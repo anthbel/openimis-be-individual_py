@@ -849,8 +849,9 @@ class IndividualImportService:
             if result and isinstance(result, dict) and result.get('success') is False:
                 raise ValueError(result.get('message', 'Unexpected error during the workflow execution'))
         except ValueError as e:
+            from individual.import_pipeline import failure_error
             upload.status = IndividualDataSourceUpload.Status.FAIL
-            upload.error = {'workflow': str(e)}
+            upload.error = failure_error(upload.id, {'workflow': str(e)})
             upload.save(username=self.user.login_name)
             return upload
 
