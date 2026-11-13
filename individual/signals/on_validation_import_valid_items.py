@@ -4,6 +4,8 @@ import string
 from typing import List
 
 from django.contrib.postgres.aggregates import ArrayAgg
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.db.models import F
 
 from core.models import User
@@ -21,6 +23,24 @@ from tasks_management.services import TaskService
 from workflow.services import WorkflowService
 
 logger = logging.getLogger(__name__)
+
+
+def _precheck_group_step(service, upload_id, data_sources):
+    """Sends ``group_service.precheck_upload``; a refusal marks the upload FAIL and propagates.
+
+    The receivers run in a savepoint, so the upload can still be marked after a database error.
+    """
+    try:
+        with transaction.atomic():
+            service.precheck_upload(data_sources)
+    except Exception as exc:
+        reason = "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
+        logger.warning("Group step of upload %s refused: %s", upload_id, reason)
+        upload = IndividualDataSourceUpload.objects.get(id=upload_id)
+        upload.status = IndividualDataSourceUpload.Status.FAIL
+        upload.error = {"group_step": reason}
+        upload.save(user=service.user)
+        raise
 
 
 class ItemsUploadTaskCompletionEvent:
@@ -120,6 +140,11 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
 
     @staticmethod
     def group_data_sources_into_entities(upload_id, user, accepted: List[str] = None):
+        """Creates or updates the group of each pending ``GroupDataSource`` of the upload.
+
+        ``group_service.precheck_upload`` is sent first with every row to process; a receiver's
+        refusal marks the upload FAIL and propagates before any row is processed.
+        """
         data_sources = GroupDataSource.objects.filter(upload_id=upload_id, group=None)
 
         # `is not None`, not truthiness: an approval flow that rejected every
@@ -130,6 +155,7 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
             data_sources = data_sources.filter(id__in=accepted)
 
         service = GroupService(user)
+        _precheck_group_step(service, upload_id, data_sources)
         for source in data_sources:
             obj_data = source.json_ext
             if obj_data.get('id'):
