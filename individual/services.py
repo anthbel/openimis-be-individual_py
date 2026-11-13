@@ -239,6 +239,15 @@ class GroupService(
         except Exception as exc:
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="update", exception=exc)
 
+    @register_service_signal('group_service.precheck_upload')
+    def precheck_upload(self, data_sources):
+        """Sent with the pending ``GroupDataSource`` rows of an upload before its group step processes any.
+
+        A receiver bound before this signal refuses the upload by raising: the group step then
+        processes none of the rows, and the exception's message is the reason the upload fails.
+        """
+        return data_sources
+
     @staticmethod
     def _in_assembly_order(individuals_data):
         """Save a declared primary recipient first, then the head, then everyone else.
@@ -840,8 +849,9 @@ class IndividualImportService:
             if result and isinstance(result, dict) and result.get('success') is False:
                 raise ValueError(result.get('message', 'Unexpected error during the workflow execution'))
         except ValueError as e:
+            from individual.import_pipeline import failure_error
             upload.status = IndividualDataSourceUpload.Status.FAIL
-            upload.error = {'workflow': str(e)}
+            upload.error = failure_error(upload.id, {'workflow': str(e)})
             upload.save(username=self.user.login_name)
             return upload
 

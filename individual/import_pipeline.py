@@ -38,6 +38,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
 from django.db import connections, transaction
 from django.db.models import Count, Exists, OuterRef
@@ -141,12 +142,32 @@ def _set_status(upload_id, status, error=None):
     IndividualDataSourceUpload.objects.filter(id=upload_id).update(**values)
 
 
+# The key of an upload's error that holds the reason its group step was refused.
+GROUP_STEP_ERROR = "group_step"
+
+
+def failure_reason(exc):
+    """The message of a failure as the upload's error shows it."""
+    if isinstance(exc, ValidationError):
+        return "; ".join(exc.messages)
+    return str(exc)
+
+
+def failure_error(upload_id, entries):
+    """``entries`` as the upload's error, after the reason its group step was refused, if it was."""
+    previous = IndividualDataSourceUpload.objects.filter(id=upload_id).values_list("error", flat=True).first()
+    refusal = previous.get(GROUP_STEP_ERROR) if isinstance(previous, dict) else None
+    if refusal:
+        return {GROUP_STEP_ERROR: refusal, **entries}
+    return entries
+
+
 def _fail(upload_id, exc):
     logger.error("Individual import pipeline failed for upload %s", upload_id, exc_info=exc)
     _set_status(
         upload_id,
         IndividualDataSourceUpload.Status.FAIL,
-        {"pipeline": str(exc), "timestamp": datetime.datetime.now().isoformat()},
+        failure_error(upload_id, {"pipeline": failure_reason(exc), "timestamp": datetime.datetime.now().isoformat()}),
     )
 
 

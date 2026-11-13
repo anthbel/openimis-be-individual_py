@@ -4,11 +4,13 @@ import string
 from typing import List
 
 from django.contrib.postgres.aggregates import ArrayAgg
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.db.models import F
 
 from core.models import User
 from individual.apps import IndividualConfig
-from individual.import_pipeline import valid_items_workflow
+from individual.import_pipeline import GROUP_STEP_ERROR, failure_error, failure_reason, valid_items_workflow
 from individual.models import (
     IndividualDataSourceUpload,
     IndividualDataSource,
@@ -21,6 +23,34 @@ from tasks_management.services import TaskService
 from workflow.services import WorkflowService
 
 logger = logging.getLogger(__name__)
+
+
+def _pending_group_sources(upload_id):
+    """The upload's ``GroupDataSource`` rows not yet turned into a group, rejected ones left out."""
+    return GroupDataSource.objects.filter(upload_id=upload_id, group=None, is_deleted=False)
+
+
+def _precheck_group_step(service, upload_id, data_sources):
+    """Sends ``group_service.precheck_upload``; a refusal marks the upload FAIL and propagates.
+
+    An upload whose group step was refused once stays refused: the stored reason is raised again
+    without sending the signal. The receivers run in a savepoint, so the upload can still be marked
+    after a database error.
+    """
+    upload = IndividualDataSourceUpload.objects.get(id=upload_id)
+    refusal = upload.error.get(GROUP_STEP_ERROR) if isinstance(upload.error, dict) else None
+    if upload.status == IndividualDataSourceUpload.Status.FAIL and refusal:
+        raise ValidationError(refusal)
+    try:
+        with transaction.atomic():
+            service.precheck_upload(data_sources)
+    except Exception as exc:
+        reason = failure_reason(exc)
+        logger.warning("Group step of upload %s refused: %s", upload_id, reason)
+        upload.status = IndividualDataSourceUpload.Status.FAIL
+        upload.error = {GROUP_STEP_ERROR: reason}
+        upload.save(user=service.user)
+        raise
 
 
 class ItemsUploadTaskCompletionEvent:
@@ -42,7 +72,7 @@ class ItemsUploadTaskCompletionEvent:
             if self.upload_record:
                 data_upload = self.upload_record.data_upload
                 data_upload.status = IndividualDataSourceUpload.Status.FAIL
-                data_upload.error = {"Task Resolve": str(result.get('message'))}
+                data_upload.error = failure_error(data_upload.id, {"Task Resolve": str(result.get('message'))})
                 # Todo: this should be changed to system user
                 data_upload.save(username=data_upload.user_updated.username)
 
@@ -119,8 +149,16 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
         data_upload.save(user=self.user)
 
     @staticmethod
-    def group_data_sources_into_entities(upload_id, user, accepted: List[str] = None):
-        data_sources = GroupDataSource.objects.filter(upload_id=upload_id, group=None)
+    def group_data_sources_into_entities(upload_id, user, accepted: List[str] = None, precheck_pending=False):
+        """Creates or updates the group of each pending ``GroupDataSource`` of the upload.
+
+        ``group_service.precheck_upload`` is sent first with every row to process, or with every
+        pending row of the upload when ``precheck_pending`` is set (a partial approval, whose later
+        votes process the others); a refusal marks the upload FAIL and propagates before any row
+        is processed.
+        """
+        pending = _pending_group_sources(upload_id)
+        data_sources = pending
 
         # `is not None`, not truthiness: an approval flow that rejected every
         # row passes an empty list, which means "process nothing". Treating
@@ -130,6 +168,7 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
             data_sources = data_sources.filter(id__in=accepted)
 
         service = GroupService(user)
+        _precheck_group_step(service, upload_id, pending if precheck_pending else data_sources)
         for source in data_sources:
             obj_data = source.json_ext
             if obj_data.get('id'):
@@ -262,6 +301,8 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
 
     def _create_task_or_data_source_into_entity(self):
         if IndividualConfig.enable_maker_checker_for_group_upload:
+            upload_id = self.upload_record.data_upload.id
+            _precheck_group_step(GroupService(self.user), upload_id, _pending_group_sources(upload_id))
             self._create_task()
         else:
             self.group_data_sources_into_entities(self.upload_record.data_upload.id, self.user)
@@ -375,7 +416,7 @@ def on_task_complete_action(business_event, **kwargs):
         if upload_record:
             data_upload = upload_record.data_upload
             data_upload.status = IndividualDataSourceUpload.Status.FAIL
-            data_upload.error = {"Task Resolve": str(exc)}
+            data_upload.error = failure_error(data_upload.id, {"Task Resolve": failure_reason(exc)})
             # Todo: this should be changed to system user
             data_upload.save(username=data_upload.user_updated.username)
         logger.error(f"Error while executing on_task_complete_action for {business_event}", exc_info=exc)
@@ -431,7 +472,7 @@ def _complete_task_for_accepted(_task, accept, user):
 
     if _task.business_event == IndividualConfig.validation_import_group_valid_items:
         BaseGroupColumnAggregationClass.group_data_sources_into_entities(
-            upload_record.data_upload.id, user, accept
+            upload_record.data_upload.id, user, accept, precheck_pending=True
         )
 
 
