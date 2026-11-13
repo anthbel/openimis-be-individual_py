@@ -9,6 +9,7 @@ from django.db import transaction
 from calculation.services import get_calculation_object
 from core.custom_filters import CustomFilterWizardStorage
 from core.models import User
+from core.service_errors import ServiceError
 from core.services import BaseService
 from core.signals import register_service_signal
 from django.apps import apps
@@ -191,7 +192,10 @@ class GroupService(
                             'recipient_type': data.get("recipient_type")
                         }
                         service = GroupIndividualService(self.user)
-                        service.create(obj_data)
+                        membership_error = ServiceError.from_dict(service.create(obj_data))
+                        if membership_error:
+                            # Raised so the group and the memberships already saved roll back.
+                            membership_error.reraise()
                 return result
         except Exception as exc:
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="create", exception=exc)

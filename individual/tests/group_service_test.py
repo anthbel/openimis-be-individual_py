@@ -1,4 +1,5 @@
 import copy
+from uuid import uuid4
 
 from django.test import TestCase
 
@@ -82,6 +83,24 @@ class GroupServiceTest(TestCase):
         # Check that the group and rest of the members takes on the individual head's location
         self.assertEqual(group.location_id, self.location.id)
         self.assertEqual(grp_ind2.individual.location_id, self.location.id)
+
+    def test_create_group_fails_when_a_membership_fails(self):
+        code = str(datetime.now())
+        payload = {
+            'code': code,
+            'individuals_data': [
+                {'individual_id': str(self.individual_1.id), 'role': 'HEAD', 'recipient_type': 'PRIMARY'},
+                {'individual_id': str(uuid4()), 'role': 'SON'},
+            ]
+        }
+
+        result = self.service.create(payload)
+
+        self.assertFalse(result.get('success', True), result)
+        self.assertEqual(result.get('message'), 'Failed to create Group')
+        self.assertTrue(result.get('detail'), result)
+        self.assertFalse(Group.objects.filter(code=code).exists())
+        self.assertFalse(GroupIndividual.objects.filter(individual=self.individual_1).exists())
 
     def test_update_group(self):
         result = self.service.create(self.payload)
