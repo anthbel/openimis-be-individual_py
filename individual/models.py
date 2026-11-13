@@ -10,6 +10,7 @@ from django.utils.translation import gettext_lazy as _
 
 import core
 from core.models import HistoryModel
+from location.apps import LocationConfig
 from location.models import Location, LocationManager
 from core.models import ParentScope
 
@@ -58,12 +59,14 @@ class Individual(HistoryModel):
 
         if not user.is_imis_admin:
             user_districts_match_individual = LocationManager().build_user_location_filter_query(
-                user._u
+                user._u,
+                loc_types=LocationConfig.location_types,
             )
             individual_has_group = models.Q(("groupindividuals__group__isnull", False))
             user_districts_match_individual_group = LocationManager().build_user_location_filter_query(
                 user._u,
-                prefix='groupindividuals__group__location'
+                prefix='groupindividuals__group__location',
+                loc_types=LocationConfig.location_types,
             )
             return queryset.filter(models.Q(
                 user_districts_match_individual | (
@@ -208,7 +211,8 @@ class Group(HistoryModel):
         if not user.is_imis_admin:
             return queryset.filter(
                 LocationManager().build_user_location_filter_query(
-                    user._u
+                    user._u,
+                    loc_types=LocationConfig.location_types,
                 )
             )
         return queryset
@@ -321,7 +325,9 @@ class GroupIndividual(HistoryModel):
         if not user.is_imis_admin:
             return queryset.filter(
                 LocationManager().build_user_location_filter_query(
-                    user._u, prefix='group__location'
+                    user._u,
+                    prefix='group__location',
+                    loc_types=LocationConfig.location_types,
                 )
             )
         return queryset
