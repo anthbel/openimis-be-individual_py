@@ -489,7 +489,7 @@ class GroupAndGroupIndividualAlignmentService:
 
         if changes_to_save:
             group.json_ext.update(changes_to_save)
-            group.save(update_fields=['json_ext'], user=self.user)
+            group.save(update_fields=['json_ext', 'version', 'date_updated', 'user_updated'], user=self.user)
 
     def handle_assure_primary_recipient_in_group(self, group, recipient_type):
         """

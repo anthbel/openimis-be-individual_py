@@ -293,6 +293,9 @@ class GroupIndividual(HistoryModel):
         service.handle_head_change(self.id, self.role, self.group_id)
         service.handle_primary_recipient_change(self.id, self.recipient_type, self.group_id)
         service.handle_assure_primary_recipient_in_group(self.group, self.recipient_type)
+        # The steps above can save the group through other instances; the group is
+        # saved below from its stored state so that each save takes the next version.
+        self.group.refresh_from_db()
         service.ensure_location_consistent(self.group, self.individual, self.role)
         service.update_json_ext_for_group(self.group)
 
@@ -305,6 +308,7 @@ class GroupIndividual(HistoryModel):
 
         from individual.services import GroupAndGroupIndividualAlignmentService
         service = GroupAndGroupIndividualAlignmentService(self.user_updated)
+        self.group.refresh_from_db()
         service.update_json_ext_for_group(self.group)
 
     @classmethod

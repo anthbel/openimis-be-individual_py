@@ -183,3 +183,70 @@ class GroupJsonExtFromHeadTest(TestCase):
         json_ext = self.group_json_ext()
         self.assertEqual(json_ext['household_size'], 5)
         self.assertEqual(json_ext['household_type'], 'RURAL')
+
+
+class GroupVersionTest(TestCase):
+    """Every membership change stores the group version its history records."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.user = LogInHelper().get_or_create_user_api()
+        cls.username = cls.user.username
+
+    def setUp(self):
+        self.group = create_group(self.username)
+
+    def assert_versions_stored(self):
+        stored = Group.objects.filter(id=self.group.id).values_list('version', flat=True).get()
+        versions = list(
+            Group.history.filter(id=self.group.id)
+            .order_by('history_date', 'history_id')
+            .values_list('version', flat=True)
+        )
+        self.assertEqual(versions, sorted(set(versions)), "group history versions repeat or go back")
+        self.assertEqual(stored, versions[-1], "stored version differs from the latest history record")
+
+    def test_adding_a_member_stores_the_incremented_version(self):
+        add_individual_to_group(self.username, create_individual(self.username), self.group, is_head=True)
+        before = Group.objects.filter(id=self.group.id).values_list('version', flat=True).get()
+
+        member = create_individual(self.username, {'first_name': 'Member'})
+        add_individual_to_group(self.username, member, self.group, is_head=False)
+
+        after = Group.objects.filter(id=self.group.id).values_list('version', flat=True).get()
+        self.assertGreater(after, before)
+        self.assert_versions_stored()
+
+    def test_removing_a_member_stores_the_incremented_version(self):
+        add_individual_to_group(self.username, create_individual(self.username), self.group, is_head=True)
+        member = create_individual(self.username, {'first_name': 'Member'})
+        membership = add_individual_to_group(self.username, member, self.group, is_head=False)
+        before = Group.objects.filter(id=self.group.id).values_list('version', flat=True).get()
+
+        membership.delete(username=self.username)
+
+        after = Group.objects.filter(id=self.group.id).values_list('version', flat=True).get()
+        self.assertGreater(after, before)
+        self.assert_versions_stored()
+
+    def test_first_head_stores_every_version(self):
+        add_individual_to_group(self.username, create_individual(self.username), self.group, is_head=True)
+
+        self.assert_versions_stored()
+
+    def test_head_change_stores_every_version(self):
+        add_individual_to_group(self.username, create_individual(self.username), self.group, is_head=True)
+
+        new_head = create_individual(self.username, {'first_name': 'NewHead'})
+        add_individual_to_group(self.username, new_head, self.group, is_head=True)
+
+        self.assert_versions_stored()
+
+    def test_head_giving_the_group_its_location_stores_every_version(self):
+        village = create_test_village({'name': 'Village V', 'code': 'ViaV'})
+        head = create_individual(self.username, {'location': village})
+        add_individual_to_group(self.username, head, self.group, is_head=True)
+
+        self.assertEqual(Group.objects.get(id=self.group.id).location_id, village.id)
+        self.assert_versions_stored()
