@@ -1,14 +1,170 @@
-from core.data_masking import DataMaskAbs
+import datetime
+
+from django.core.exceptions import FieldDoesNotExist, PermissionDenied
+from graphene.types.resolver import dict_or_attr_resolver
+
+from core.apps import CoreConfig
+from core.data_masking import DataMaskAbs, MaskingClassStorage
 from individual.apps import IndividualConfig
 
+# Group json_ext keys holding member names, written from the persons' names by
+# GroupService.update_json_ext_for_group.
+NAME_COLUMNS = ("first_name", "last_name")
+GROUP_NAME_KEYS = ("head", "members", "primary_recipient", "secondary_recipient")
+JSON_PREFIX = "json_ext."
 
-class IndividualMask(DataMaskAbs):
+
+class RegisteredFieldsMask(DataMaskAbs):
+    """A mask of its own fields and of the fields other modules register with ``register_fields``.
+
+    A source is a callable returning field paths (a column or ``json_ext.<key>``), called each time the
+    mask is applied. The registered fields are masked whatever the module's own masking switch says.
+    """
+
+    _sources = {}
+
+    @property
+    def own_enabled(self):
+        return True
+
+    @classmethod
+    def register_fields(cls, key, source):
+        """Registers ``source`` under ``key``; None removes it. History masks share their live mask's sources."""
+        if source is None:
+            cls._sources.pop(key, None)
+        else:
+            cls._sources[key] = source
+
+    def own_fields(self):
+        return []
+
+    def registered_fields(self):
+        return [field for source in list(self._sources.values()) for field in (source() or [])]
+
+    @property
+    def anon_fields(self):
+        own = list(self.own_fields() or []) if self.own_enabled else []
+        return list(dict.fromkeys(own + self.registered_fields()))
+
+    @property
+    def masking_enabled(self):
+        return bool(self.anon_fields)
+
+    def anonymize(self, value):
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            return super().anonymize("")
+        if isinstance(value, list):
+            return [self.anonymize(item) for item in value]
+        return super().anonymize(value)
+
+
+class IndividualMask(RegisteredFieldsMask):
     masking_model = 'Individual'
-    anon_fields = IndividualConfig.individual_mask_fields
-    masking_enabled = IndividualConfig.individual_masking_enabled
+    _sources = {}
+
+    @property
+    def own_enabled(self):
+        return bool(IndividualConfig.individual_masking_enabled)
+
+    def own_fields(self):
+        return IndividualConfig.individual_mask_fields
 
 
-class IndividualHistoryMask(DataMaskAbs):
+class IndividualHistoryMask(IndividualMask):
     masking_model = 'HistoricalIndividual'
-    anon_fields = IndividualConfig.individual_mask_fields
-    masking_enabled = IndividualConfig.individual_masking_enabled
+
+
+def head_copy_fields(person_fields):
+    """The group json_ext paths holding a copy of the masked person fields ``person_fields``: the head's
+    json_ext keys copied onto the group, and the member names when a name column is masked."""
+    not_copied = set(IndividualConfig.group_json_ext_keys_not_copied_from_head or ())
+    paths = [field for field in person_fields
+             if field.startswith(JSON_PREFIX) and field[len(JSON_PREFIX):].split(".")[0] not in not_copied]
+    if any(field in NAME_COLUMNS for field in person_fields):
+        paths += [JSON_PREFIX + key for key in GROUP_NAME_KEYS]
+    return paths
+
+
+class GroupMask(RegisteredFieldsMask):
+    """The registered group fields, and the group's copy of the fields the person mask masks."""
+
+    masking_model = 'Group'
+    _sources = {}
+
+    def own_fields(self):
+        return head_copy_fields(IndividualMask().anon_fields)
+
+
+class GroupHistoryMask(GroupMask):
+    masking_model = 'HistoricalGroup'
+
+
+def may_see_masked(user):
+    return user.has_perms(CoreConfig.gql_query_enable_viewing_masked_data_perms)
+
+
+def context_may_see_masked(info):
+    """Whether the user of the GraphQL request may see masked data, checked once per request."""
+    context = info.context
+    if not hasattr(context, "_individual_may_see_masked"):
+        context._individual_may_see_masked = may_see_masked(context.user)
+    return context._individual_may_see_masked
+
+
+def mask_once(info, obj, masking_model):
+    """Masks ``obj`` in place by the mask registered for ``masking_model``, once per object, unless the user
+    of the request may see masked data."""
+    if getattr(obj, "_data_mask_checked", False):
+        return obj
+    obj._data_mask_checked = True
+    if context_may_see_masked(info):
+        return obj
+    mask = MaskingClassStorage.get_masking_class(masking_model)
+    if mask is not None and mask.masking_enabled:
+        mask.apply_mask(obj)
+    return obj
+
+
+def masking_resolver(masking_model):
+    """A default field resolver masking the object first, so the type is masked on every path reaching it."""
+
+    def resolve(attname, default_value, root, info, **args):
+        mask_once(info, root, masking_model)
+        return dict_or_attr_resolver(attname, default_value, root, info, **args)
+
+    return resolve
+
+
+def reads_masked_field(model, lookup):
+    """Whether the ``__`` lookup ``lookup`` from ``model`` reads a field the mask registered for a model it
+    reaches masks; a whole ``json_ext`` is masked while any of its paths is."""
+    parts = lookup.split("__")
+    for index, part in enumerate(parts):
+        mask = MaskingClassStorage.get_masking_class(model.__name__)
+        fields = mask.anon_fields if mask is not None and mask.masking_enabled else []
+        if part == "json_ext" and fields:
+            path = ".".join(parts[index + 1:])
+            masked = [field[len(JSON_PREFIX):] for field in fields if field.startswith(JSON_PREFIX)]
+            if not path:
+                return bool(masked)
+            return any(path == key or path.startswith(f"{key}.") or key.startswith(f"{path}.") for key in masked)
+        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+            return True
+        try:
+            field = model._meta.get_field(part)
+        except FieldDoesNotExist:
+            return False
+        if not field.is_relation:
+            return False
+        model = field.related_model
+    return False
+
+
+def check_export_columns(user, model, lookups):
+    """Refuses an export column reading a masked field to a user without the masked-data right: an export
+    reads the stored values, which no mask reaches."""
+    if may_see_masked(user):
+        return
+    for lookup in lookups:
+        if reads_masked_field(model, lookup):
+            raise PermissionDenied(f"the column {lookup} needs the right to view masked data")
