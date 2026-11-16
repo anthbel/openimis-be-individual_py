@@ -242,9 +242,13 @@ class IndividualConfig(AppConfig):
         )
 
     def __register_masking_class(cls):
-        from individual.data_masking import GroupHistoryMask, GroupMask, IndividualHistoryMask, IndividualMask
+        from individual.data_masking import (
+            GroupHistoryMask, GroupMask, GroupUploadRowMask, IndividualHistoryMask, IndividualMask,
+            IndividualUploadRowMask,
+        )
         MaskingClassRegistryPoint.register_masking_class(
-            masking_class_list=[IndividualMask(), IndividualHistoryMask(), GroupMask(), GroupHistoryMask()]
+            masking_class_list=[IndividualMask(), IndividualHistoryMask(), GroupMask(), GroupHistoryMask(),
+                                IndividualUploadRowMask(), GroupUploadRowMask()]
         )
 
     def _set_up_workflows(self):

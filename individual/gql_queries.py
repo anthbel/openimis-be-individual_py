@@ -134,11 +134,14 @@ class IndividualDataSourceUploadGQLType(ScopedQuerysetMixin, DjangoObjectType):
 
 
 class IndividualDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
+    """An upload row, masked with its validation errors by the person mask on every path reaching it."""
+
     uuid = graphene.String(source='uuid')
 
     class Meta:
         model = IndividualDataSource
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("IndividualDataSource")
         filter_fields = {
             "id": ["exact", "isnull"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],
@@ -293,11 +296,14 @@ class IndividualDataUploadQGLType(ScopedQuerysetMixin, DjangoObjectType, JsonExt
 
 
 class GroupDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
+    """A group upload row, masked with its validation errors by the group mask on every path reaching it."""
+
     uuid = graphene.String(source='uuid')
 
     class Meta:
         model = GroupDataSource
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("GroupDataSource")
         filter_fields = {
             "id": ["exact", "isnull"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],

@@ -99,8 +99,58 @@ class GroupHistoryMask(GroupMask):
     masking_model = 'HistoricalGroup'
 
 
+class UploadRowMask(DataMaskAbs):
+    """An upload row (a data source's json_ext, holding its unit's columns and json_ext keys at its top level)
+    masked by the mask of its unit, with the note of a validation error on a masked key."""
+
+    unit_mask = None
+
+    @property
+    def anon_fields(self):
+        return [JSON_PREFIX + (field[len(JSON_PREFIX):] if field.startswith(JSON_PREFIX) else field)
+                for field in self.unit_mask().anon_fields]
+
+    @property
+    def masking_enabled(self):
+        return bool(self.anon_fields)
+
+    def anonymize(self, value):
+        return self.unit_mask().anonymize(value)
+
+    def apply_mask(self, data):
+        fields = self.anon_fields
+        for field in fields:
+            self._anonymize_nested_field(data, field.split("."))
+        masked_keys = {field[len(JSON_PREFIX):].split(".")[0] for field in fields}
+        validations = getattr(data, "validations", None)
+        errors = validations.get("validation_errors") if isinstance(validations, dict) else None
+        for error in errors if isinstance(errors, list) else ():
+            if isinstance(error, dict) and error.get("field_name") in masked_keys:
+                error["note"] = self.anonymize(error.get("note"))
+        return data
+
+
+class IndividualUploadRowMask(UploadRowMask):
+    masking_model = 'IndividualDataSource'
+    unit_mask = IndividualMask
+
+
+class GroupUploadRowMask(UploadRowMask):
+    masking_model = 'GroupDataSource'
+    unit_mask = GroupMask
+
+
 def may_see_masked(user):
     return user.has_perms(CoreConfig.gql_query_enable_viewing_masked_data_perms)
+
+
+def mask_for_user(user, masking_model, obj):
+    """Masks ``obj`` in place by the mask registered for ``masking_model`` unless ``user`` may see masked data."""
+    if not may_see_masked(user):
+        mask = MaskingClassStorage.get_masking_class(masking_model)
+        if mask is not None and mask.masking_enabled:
+            mask.apply_mask(obj)
+    return obj
 
 
 def context_may_see_masked(info):

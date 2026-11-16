@@ -64,13 +64,15 @@ It is dedicated to be deployed as a module of [openimis-be_py](https://github.co
 * individual_masking_enabled, individual_mask_fields: whether `individual_mask_fields` (column names or `json_ext.<key>` paths) are masked for users without the masked-data right (`gql_query_enable_viewing_masked_data_perms`). Read when a mask is applied, so a reloaded configuration applies.
 
 ## Data masking
-`individual/data_masking.py` registers four `core.data_masking` masks: `Individual` and `HistoricalIndividual` (the person mask), `Group` and `HistoricalGroup` (the group mask). For a user without the masked-data right they mask:
+`individual/data_masking.py` registers six `core.data_masking` masks: `Individual` and `HistoricalIndividual` (the person mask), `Group` and `HistoricalGroup` (the group mask), and the upload row masks `IndividualDataSource` and `GroupDataSource`. For a user without the masked-data right they mask:
 * persons: `individual_mask_fields` while `individual_masking_enabled`, and the fields other modules register with `IndividualMask.register_fields(key, source)`;
 * groups: the fields registered with `GroupMask.register_fields(key, source)`, and the group's copy of the masked person fields: the head's masked `json_ext` keys (less `group_json_ext_keys_not_copied_from_head`), and `head`, `members`, `primary_recipient` and `secondary_recipient` when `first_name` or `last_name` is masked.
 
 A source is a callable returning field paths (a column or `json_ext.<key>`), called each time a mask is applied; `None` removes the registration. Registered fields are masked whatever `individual_masking_enabled` says. A string becomes `***************`, a number 0, a date the masked string, and dictionaries and lists are masked item by item.
 
 `IndividualGQLType`, `IndividualHistoryGQLType`, `GroupGQLType` and `GroupHistoryGQLType` apply the mask on every path that reaches them (the `individual`, `group` and their history queries, `group.head`, `groupIndividual.individual` and `.group`, the data sources, and the types of other modules pointing to them). `dob` is therefore a string: `YYYY-MM-DD`, or the mask.
+
+Upload rows are masked by the mask of the unit they hold (`IndividualDataSource` by the person mask, `GroupDataSource` by the group mask, each registered under its model name): the row's keys of the masked columns and `json_ext` keys, and the note of a validation error whose `field_name` is one of them. This applies to `individualDataSource` and `groupDataSource` and the types reaching them, and to the invalid rows download (`download_invalid_items`). The uploaded file (`download_individual_upload_file`) holds the stored values, so it is refused to a user without the masked-data right while the person mask masks any field.
 
 `individualExport`, `groupExport` and `groupIndividualExport` read the stored values, so a column reading a masked field (a whole `jsonExt` while any of its keys is masked, a column of a person or group reached through a relation included) is refused to a user without the masked-data right.
 

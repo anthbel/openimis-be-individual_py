@@ -2,13 +2,19 @@ import datetime
 import json
 from unittest import mock
 
+from django.http import HttpResponse
 from django.test import TestCase
+from django.urls import reverse
+from rest_framework.test import APIClient
 
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user
 from individual.apps import IndividualConfig
 from individual.data_masking import GroupHistoryMask, GroupMask, IndividualHistoryMask, IndividualMask
-from individual.models import Group, GroupIndividual, Individual
+from individual.models import (
+    Group, GroupDataSource, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload,
+)
+from individual.views import download_individual_upload, download_invalid_items
 from location.test_helpers import create_test_village
 
 MASKED = "***************"
@@ -257,3 +263,100 @@ class MaskedExportTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                               ("groupExport", "jsonExt.roof")):
             with self.subTest(query=query, column=column):
                 self.assertNotIn("errors", self.export(self.viewer, query, ["id", column]))
+
+
+DATA_SOURCE_QUERY = """
+query {
+  individualDataSource(upload_Id: "%(upload)s") { edges { node { jsonExt validations individual { firstName } } } }
+  groupDataSource(upload_Id: "%(upload)s") { edges { node { jsonExt validations group { code } } } }
+}
+"""
+
+
+class UploadRowMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """An upload row and its validation errors are masked by the mask of the person or group the row holds."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Upload village", "code": "MkU"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_up_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_up_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_up_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        group = Group(code="MK-U1", location=village, json_ext={"income": 120, "roof": "tin"})
+        group.save(user=admin)
+        person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
+                            location=village, json_ext={"phone": "+257 1", "sex": "F"})
+        person.save(user=admin)
+        self.upload = IndividualDataSourceUpload(source_name="rows.csv", source_type="individual import")
+        self.upload.save(user=admin)
+        IndividualDataSource(
+            upload=self.upload, individual=person,
+            json_ext={"first_name": "Ada", "last_name": "Lovelace", "dob": "1980-01-02", "phone": "+257 1",
+                      "sex": "F"},
+            validations={"validation_errors": [
+                {"field_name": "phone", "note": "'phone' Field value '+257 1' is duplicated in this upload"},
+                {"field_name": "sex", "note": "'sex' is required"},
+            ]},
+        ).save(user=admin)
+        GroupDataSource(
+            upload=self.upload, group=group,
+            json_ext={"code": "MK-U1", "income": 120, "roof": "tin",
+                      "individuals_data": [{"individual_id": str(person.id), "role": "HEAD"}]},
+        ).save(user=admin)
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
+        self.register()
+
+    def gql(self, user):
+        response = self.query(DATA_SOURCE_QUERY % {"upload": self.upload.id},
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        [row] = [edge["node"] for edge in content["data"]["individualDataSource"]["edges"]]
+        [group_row] = [edge["node"] for edge in content["data"]["groupDataSource"]["edges"]]
+        return row, group_row
+
+    def download(self, user, view, **params):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(reverse(view), params)
+
+    def test_the_rows_and_their_errors_are_masked_without_the_masked_data_right(self):
+        row, group_row = self.gql(self.viewer)
+        data = json.loads(row["jsonExt"])
+        self.assertEqual((data["first_name"], data["dob"], data["phone"]), (MASKED, MASKED, MASKED))
+        self.assertEqual((data["last_name"], data["sex"]), ("Lovelace", "F"))
+        notes = {error["field_name"]: error["note"] for error in json.loads(row["validations"])["validation_errors"]}
+        self.assertEqual(notes, {"phone": MASKED, "sex": "'sex' is required"})
+        self.assertEqual(row["individual"]["firstName"], MASKED)
+        data = json.loads(group_row["jsonExt"])
+        self.assertEqual((data["code"], data["income"], data["roof"]), (MASKED, 0, "tin"))
+        self.assertEqual(data["individuals_data"][0]["role"], "HEAD")
+        self.assertEqual(group_row["group"]["code"], MASKED)
+
+    def test_the_rows_are_clear_with_the_masked_data_right(self):
+        row, group_row = self.gql(self.unmasked)
+        data = json.loads(row["jsonExt"])
+        self.assertEqual((data["first_name"], data["dob"], data["phone"]), ("Ada", "1980-01-02", "+257 1"))
+        self.assertIn("+257 1", json.loads(row["validations"])["validation_errors"][0]["note"])
+        self.assertEqual(json.loads(group_row["jsonExt"])["code"], "MK-U1")
+
+    def test_the_invalid_rows_download_is_masked_without_the_masked_data_right(self):
+        masked = b"".join(self.download(self.viewer, download_invalid_items, upload_id=self.upload.id)
+                          .streaming_content).decode()
+        self.assertNotIn("Ada", masked)
+        self.assertNotIn("+257 1", masked)
+        self.assertIn("Lovelace", masked)
+        clear = b"".join(self.download(self.unmasked, download_invalid_items, upload_id=self.upload.id)
+                         .streaming_content).decode()
+        self.assertIn("Ada", clear)
+        self.assertIn("+257 1", clear)
+
+    def test_the_uploaded_file_needs_the_masked_data_right(self):
+        response = self.download(self.viewer, download_individual_upload, filename="rows.csv")
+        self.assertEqual(response.status_code, 403)
+        with mock.patch("individual.views.DefaultStorageFileHandler") as handler:
+            handler.return_value.get_file_response_csv.return_value = HttpResponse(b"rows")
+            response = self.download(self.unmasked, download_individual_upload, filename="rows.csv")
+        self.assertEqual(response.status_code, 200)

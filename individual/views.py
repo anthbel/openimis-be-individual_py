@@ -13,9 +13,11 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
+from core.data_masking import MaskingClassStorage
 from core.utils import DefaultStorageFileHandler
 from core.views import check_user_rights
 from individual.apps import IndividualConfig
+from individual.data_masking import mask_for_user, may_see_masked
 from individual.models import IndividualDataSource
 from individual.services import IndividualImportService
 
@@ -155,6 +157,7 @@ def download_invalid_items(request):
         # Prepare data for invalid items as a list of dictionaries
         data_from_source = []
         for invalid_item in invalid_items:
+            mask_for_user(request.user, "IndividualDataSource", invalid_item)
             json_ext = invalid_item.json_ext
             json_ext["id"] = invalid_item.id
             json_ext["error"] = invalid_item.validations
@@ -189,6 +192,11 @@ def download_invalid_items(request):
 @api_view(["GET"])
 @permission_classes([check_user_rights(IndividualConfig.gql_individual_search_perms)])
 def download_individual_upload(request):
+    # The file holds the stored row values, which no mask reaches.
+    mask = MaskingClassStorage.get_masking_class("IndividualDataSource")
+    if not may_see_masked(request.user) and mask is not None and mask.masking_enabled:
+        return Response({'success': False, 'error': _("The uploaded file needs the right to view masked data")},
+                        status=status.HTTP_403_FORBIDDEN)
     try:
         # Get the filename from the request parameters
         filename = request.query_params.get('filename')
