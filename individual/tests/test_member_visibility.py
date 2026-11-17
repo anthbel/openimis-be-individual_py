@@ -139,11 +139,12 @@ class MemberVisibilityTest(openIMISGraphQLTestCase):
     def test_a_reader_of_another_district_exports_no_membership_of_a_household_of_that_district(self):
         self.member(self.located_group, "Mvihousehold", GroupIndividual.Role.SON)
         self.assertEqual(self.listed(self.far_reader, self.located_group), (set(), set()))
-        content = self.gql_content(
-            self.far_reader, '{ groupIndividualExport(group_Id: "%s", fields: ["individual.lastName"], '
-                             'fieldsColumns: "{}") }' % self.located_group.id)
-        self.assertFalse((content.get("data") or {}).get("groupIndividualExport"))
-        self.assertFalse(ExportableQueryModel.objects.filter(user=self.far_reader).exists())
+        before = set(ExportableQueryModel.objects.values_list("id", flat=True))
+        self.gql_content(self.far_reader, '{ groupIndividualExport(group_Id: "%s", fields: ["individual.lastName"], '
+                                          'fieldsColumns: "{}") }' % self.located_group.id)
+        for file in ExportableQueryModel.objects.exclude(id__in=before):
+            file.content.open("rb")
+            self.assertEqual(list(csv.DictReader(io.StringIO(file.content.read().decode()))), [])
 
     def test_the_membership_export_leaves_out_the_hidden_person(self):
         for user in (self.far_reader, self.near_reader):

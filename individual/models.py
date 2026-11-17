@@ -89,8 +89,7 @@ class Individual(HistoryModel):
     @classmethod
     def _deleted_without_location(cls, person):
         """``Exists`` on the person the outer field ``person`` holds being soft-deleted with no location of their own
-        and no household with a location: no location places them in a location-scoped user's rows. Negated, it
-        plans as an anti-join."""
+        and no household with a location: no location places them in a location-scoped user's rows."""
         in_located_household = GroupIndividual.objects.filter(individual_id=OuterRef("id"),
                                                               group__location__isnull=False)
         return Exists(cls.objects.filter(id=OuterRef(person), is_deleted=True, location__isnull=True)
