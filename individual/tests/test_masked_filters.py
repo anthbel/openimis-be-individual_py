@@ -72,6 +72,14 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         "group enrollment summary": '{ groupEnrollmentSummary(customFilters: ["phone__icontains__string=+257"]) '
                                     '{ numberOfSelectedGroups } }',
         "export filter": '{ individualExport(firstName_Icontains: "Ad", fields: ["id"], fieldsColumns: "{}") }',
+        "persons nested in a location": '{ individual(id: "%(person)s") { edges { node { location { '
+                                        'individuals(firstName_Icontains: "Ad") { totalCount } } } } } }',
+        "groups nested in a location": '{ group(id: "%(group)s") { edges { node { location { '
+                                       'groups(code_Icontains: "MK") { totalCount } } } } } }',
+        "persons nested in a user": '{ individualHistory(id: "%(person)s") { edges { node { userUpdated { '
+                                    'individualUserCreated(dob_Lt: "1990-01-01") { totalCount } } } } } }',
+        "memberships nested in a user": '{ individualHistory(id: "%(person)s") { edges { node { userUpdated { '
+                                        'groupindividualUserCreated(role: HEAD) { totalCount } } } } } }',
     }
 
     def test_an_export_custom_filter_reading_a_masked_field_is_refused_without_the_masked_data_right(self):
