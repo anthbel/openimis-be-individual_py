@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime as py_datetime
 import json
 import uuid
 import pandas as pd
@@ -192,10 +193,10 @@ class GroupService(
                             'recipient_type': data.get("recipient_type")
                         }
                         service = GroupIndividualService(self.user)
-                        membership_error = ServiceError.from_dict(service.create(obj_data))
-                        if membership_error:
-                            # Raised so the group and the memberships already saved roll back.
-                            membership_error.reraise()
+                        self._check_membership(service.create(obj_data))
+                    self._store_version(group_id)
+                    return output_result_success(dict_representation=model_representation(
+                        Group.objects.get(id=group_id)))
                 return result
         except Exception as exc:
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="create", exception=exc)
@@ -203,41 +204,70 @@ class GroupService(
     @check_authentication
     @register_service_signal('group_service.update')
     def update(self, obj_data):
+        """Updates the group's fields, then brings its memberships to ``individuals_data`` when given.
+
+        The group row is locked before any membership write. A call that changes a membership ends with a
+        save that stores the group's version after every membership write; a failed membership change
+        rolls the whole call back.
+        """
         try:
             with transaction.atomic():
                 individuals_data = obj_data.pop('individuals_data', None)
+                group_id = obj_data.get('id')
+                Group.objects.select_for_update().filter(id=group_id).first()
                 result = super().update(obj_data)
-
-                if not individuals_data:
+                if not individuals_data or not result.get('success'):
                     return result
-
-                group_id = obj_data['id']
-                assigned_individuals_ids = \
-                    GroupIndividual.objects.filter(group_id=group_id).values_list('individual_id', flat=True)
-
-                service = GroupIndividualService(self.user)
-                individual_ids = [data['individual_id'] for data in individuals_data]
-                group = self._update_group_json_ext(group_id, individual_ids)
-
-                for individual_id in assigned_individuals_ids:
-                    if str(individual_id) not in individual_ids:
-                        group_individual = GroupIndividual.objects.get(group_id=group_id, individual_id=individual_id)
-                        service.delete({'id': group_individual.id})
-
-                for data in self._in_assembly_order(individuals_data):
-                    if uuid.UUID(data["individual_id"]) not in assigned_individuals_ids:
-                        obj_data = {
-                            'group_id': group_id,
-                            'individual_id': data.get("individual_id"),
-                            'role': data.get("role"),
-                            'recipient_type': data.get("recipient_type")
-                        }
-                        service.create(obj_data)
-
-                dict_repr = model_representation(group)
-                return output_result_success(dict_representation=dict_repr)
+                if self._apply_memberships(group_id, individuals_data):
+                    self._store_version(group_id)
+                return output_result_success(dict_representation=model_representation(
+                    Group.objects.get(id=group_id)))
         except Exception as exc:
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="update", exception=exc)
+
+    def _apply_memberships(self, group_id, individuals_data):
+        """Removes the live members ``individuals_data`` does not list and adds the listed persons who never
+        had a membership of the group; a person whose membership was deleted is not added again.
+
+        Returns True when a membership changed.
+        """
+        memberships = GroupIndividual.objects.filter(group_id=group_id)
+        live = {str(membership.individual_id): membership for membership in memberships if not membership.is_deleted}
+        present = set(live) | {str(membership.individual_id) for membership in memberships}
+        listed = {str(data['individual_id']) for data in individuals_data}
+        service = GroupIndividualService(self.user)
+        changed = False
+        for individual_id, membership in live.items():
+            if individual_id not in listed:
+                self._check_membership(service.delete({'id': membership.id}))
+                changed = True
+        for data in self._in_assembly_order(individuals_data):
+            individual_id = str(data['individual_id'])
+            if individual_id in present:
+                continue
+            self._check_membership(service.create({
+                'group_id': group_id,
+                'individual_id': individual_id,
+                'role': data.get('role'),
+                'recipient_type': data.get('recipient_type'),
+            }))
+            present.add(individual_id)
+            changed = True
+        return changed
+
+    @staticmethod
+    def _check_membership(result):
+        """Raises the error of a failed membership result, so the call's writes roll back."""
+        membership_error = ServiceError.from_dict(result)
+        if membership_error:
+            membership_error.reraise()
+
+    def _store_version(self, group_id):
+        """Saves the group as stored after its membership writes, under a new version and history record."""
+        group = Group.objects.get(id=group_id)
+        group.refresh_from_db()
+        group.date_updated = py_datetime.now()
+        group.save(user=self.user)
 
     @register_service_signal('group_service.precheck_upload')
     def precheck_upload(self, data_sources):

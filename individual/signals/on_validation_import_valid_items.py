@@ -53,6 +53,14 @@ def _precheck_group_step(service, upload_id, data_sources):
         raise
 
 
+def _report_failed_row(source, result, user):
+    """Records a failed group create or update on its ``GroupDataSource``, which stays without a group."""
+    reason = result.get('detail') or result.get('message')
+    logger.warning("Group step row %s failed: %s", source.id, reason)
+    source.validations = {**(source.validations or {}), GROUP_STEP_ERROR: reason}
+    source.save(username=user.username)
+
+
 class ItemsUploadTaskCompletionEvent:
     # True when the workflow only queued its work (the Python pipeline's celery
     # import): what follows the import then runs when the last chunk finishes.
@@ -176,6 +184,9 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
             else:
                 result = service.create(obj_data)
 
+            if not result.get('success'):
+                _report_failed_row(source, result, user)
+                continue
             group_id = result["data"].get('id')
             if group_id:
                 source.group_id = group_id
