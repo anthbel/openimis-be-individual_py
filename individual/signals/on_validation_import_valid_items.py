@@ -1,3 +1,4 @@
+import copy
 import logging
 import random
 import string
@@ -51,6 +52,14 @@ def _precheck_group_step(service, upload_id, data_sources):
         upload.error = {GROUP_STEP_ERROR: reason}
         upload.save(user=service.user)
         raise
+
+
+def _report_failed_row(source, result, user):
+    """Records a failed group create or update on its ``GroupDataSource``, which stays without a group."""
+    reason = result.get('detail') or result.get('message')
+    logger.warning("Group step row %s failed: %s", source.id, reason)
+    source.validations = {**(source.validations or {}), GROUP_STEP_ERROR: reason}
+    source.save(username=user.username)
 
 
 class ItemsUploadTaskCompletionEvent:
@@ -170,12 +179,16 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
         service = GroupService(user)
         _precheck_group_step(service, upload_id, pending if precheck_pending else data_sources)
         for source in data_sources:
-            obj_data = source.json_ext
+            # GroupService pops individuals_data from the dict it is given; the row keeps its own.
+            obj_data = copy.deepcopy(source.json_ext)
             if obj_data.get('id'):
                 result = service.update(obj_data)
             else:
                 result = service.create(obj_data)
 
+            if not result.get('success'):
+                _report_failed_row(source, result, user)
+                continue
             group_id = result["data"].get('id')
             if group_id:
                 source.group_id = group_id
