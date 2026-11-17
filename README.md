@@ -53,6 +53,8 @@ It is dedicated to be deployed as a module of [openimis-be_py](https://github.co
 
 Saving a group that has a location gives that location to its live members (memberships not deleted); a former member keeps their own.
 
+An enrolment (`confirmIndividualEnrollment`, `confirmGroupEnrollment`, through `select_individuals_to_benefit_plan` and `select_groups_to_benefit_plan`) selects only the persons and groups the user may see, as the `individual` and `group` queries scope them by the user's locations.
+
 ## Configuration options (can be changed via core.ModuleConfiguration)
 * gql_individual_search_perms: required rights to call individual GraphQL Query (default: ["159001"])
 * gql_individual_create_perms: required rights to call createIndividual GraphQL Mutation (default: ["159002"])
