@@ -68,13 +68,30 @@ class Individual(HistoryModel):
                 prefix='groupindividuals__group__location',
                 loc_types=LocationConfig.location_types,
             )
-            return queryset.filter(models.Q(
+            queryset = queryset.filter(models.Q(
                 user_districts_match_individual | (
                     individual_has_group & user_districts_match_individual_group
                 )
             ))
+            if cls._location_scoped(user):
+                queryset = queryset.exclude(cls._deleted_without_location())
+            return queryset
 
         return queryset
+
+    @staticmethod
+    def _location_scoped(user):
+        """Whether ``build_user_location_filter_query`` narrows ``user`` to its locations."""
+        from core.models import InteractiveUser
+
+        return isinstance(user._u, InteractiveUser) and not user._u.is_superuser
+
+    @staticmethod
+    def _deleted_without_location():
+        """``Q`` on the soft-deleted persons with no location of their own and no household with a location: no
+        location places them in a location-scoped user's rows."""
+        in_located_household = GroupIndividual.objects.filter(group__location__isnull=False).values("individual_id")
+        return Q(is_deleted=True, location__isnull=True) & ~Q(id__in=in_located_household)
 
 
 class IndividualDataSourceUpload(HistoryModel):
