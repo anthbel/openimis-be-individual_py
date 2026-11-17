@@ -421,14 +421,14 @@ def _equal(left, right):
         return False
 
 
-def _holds_placeholder(value):
+def holds_mask_placeholder(value):
     """Whether ``value`` is the string mask or holds it as a leaf of its lists and objects, at any depth."""
     if isinstance(value, str):
         return value == MASK_PLACEHOLDER
     if isinstance(value, dict):
-        return any(_holds_placeholder(item) for item in value.values())
+        return any(holds_mask_placeholder(item) for item in value.values())
     if isinstance(value, (list, tuple)):
-        return any(_holds_placeholder(item) for item in value)
+        return any(holds_mask_placeholder(item) for item in value)
     return False
 
 
@@ -481,7 +481,7 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
             if path and isinstance(obj_data[name], dict) and stored is not _ABSENT:
                 _set_at(obj_data[name], path, copy.deepcopy(stored))
             continue
-        if not _holds_placeholder(incoming) or _equal(incoming, stored):
+        if not holds_mask_placeholder(incoming) or _equal(incoming, stored):
             continue
         if not path and isinstance(stored, (datetime.date, datetime.datetime)):
             del obj_data[name]
@@ -496,3 +496,17 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
     if refused:
         raise ValidationError(
             f"masked value sent back for {', '.join(refused)}: send a new value or leave the field out")
+
+
+def masked_row_fields_holding_the_mask(row, masking_model="IndividualDataSource"):
+    """The masked keys of the upload row ``row`` (its values by key) whose value holds the string mask."""
+    mask = MaskingClassStorage.get_masking_class(masking_model)
+    if mask is None or not mask.masking_enabled:
+        return []
+    fields = []
+    for field in mask.anon_fields:
+        key, *path = field[len(JSON_PREFIX):].split(".")
+        value = _value_at(row.get(key, _ABSENT) if isinstance(row, dict) else _ABSENT, path)
+        if value is not _ABSENT and holds_mask_placeholder(value) and key not in fields:
+            fields.append(key)
+    return fields

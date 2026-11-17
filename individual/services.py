@@ -18,7 +18,7 @@ from django.apps import apps
 # from django.utils.translation import gettext as _
 from django.db.models import Q, OuterRef, Subquery, Count
 from individual.apps import IndividualConfig
-from individual.data_masking import check_masked_values_sent_back
+from individual.data_masking import check_masked_values_sent_back, masked_row_fields_holding_the_mask
 from individual.models import (
     Individual,
     IndividualDataSource,
@@ -686,11 +686,14 @@ class IndividualImportService:
         )
         record.save(user=self.user)
 
-    def validate_import_individuals(self, upload_id: uuid, individual_sources):
+    def validate_import_individuals(self, upload_id: uuid, individual_sources, refuse_mask_placeholder=False):
+        """Validates the upload rows and stores their errors; ``refuse_mask_placeholder`` refuses a row whose
+        masked field holds the string mask (an update upload, where it would replace the stored value)."""
         dataframe = load_dataframe(individual_sources)
         validated_dataframe, invalid_items = self._validate_possible_individuals(
             dataframe,
-            upload_id
+            upload_id,
+            refuse_mask_placeholder,
         )
         return {'success': True, 'data': validated_dataframe, 'summary_invalid_items': invalid_items}
 
@@ -742,7 +745,7 @@ class IndividualImportService:
 
         return validated_dataframe
 
-    def _validate_possible_individuals(self, dataframe: DataFrame, upload_id: uuid):
+    def _validate_possible_individuals(self, dataframe: DataFrame, upload_id: uuid, refuse_mask_placeholder=False):
         schema_dict = json.loads(IndividualConfig.individual_schema)
         properties = schema_dict.get("properties", {})
 
@@ -774,6 +777,14 @@ class IndividualImportService:
             user_allowed_loc_ids,
             duplicate_village_name_code_tuples,
         )
+        if refuse_mask_placeholder:
+            for field_validation in validated_dataframe:
+                for field in masked_row_fields_holding_the_mask(field_validation['row']):
+                    field_validation['validations'][f'{field}_mask_placeholder'] = {
+                        'success': False,
+                        'field_name': field,
+                        'note': f"'{field}' holds the mask placeholder, which is not a value",
+                    }
 
         self.save_validation_error_in_data_source_bulk(validated_dataframe)
         invalid_items = fetch_summary_of_broken_items(upload_id)
