@@ -56,7 +56,11 @@ _EXPORTING_USER = contextvars.ContextVar("individual_exporting_user", default=No
 
 class MaskedExportQueryMixin(ExportableQueryMixin):
     """Core's exports, refusing to a user without the masked-data right the filters and custom filters that read
-    a masked field, and writing the columns that read one masked (``mask_export_columns``, the first patch)."""
+    a masked field, and writing the columns that read one masked (``mask_export_columns``, the first patch).
+
+    The exporters belong to the class declaring the exported fields: the schema's query class, which combines
+    it with the queries of other modules, inherits them as they are, so the export settings of those modules
+    (``related_field``, ``object_type``) and their exporters never apply to these fields."""
 
     @classmethod
     def get_patches_for_field(cls, field_type):
@@ -65,8 +69,10 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
 
     @classmethod
     def create_export_function(cls, field_name):
-        super().create_export_function(field_name)
         resolver_name = f"resolve_{field_name}_export"
+        if getattr(getattr(cls, resolver_name, None), "masked_export", False):
+            return
+        super().create_export_function(field_name)
         core_exporter = getattr(cls, resolver_name)
 
         def exporter(root, info, **kwargs):
@@ -82,6 +88,7 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
             finally:
                 _EXPORTING_USER.reset(token)
 
+        exporter.masked_export = True
         setattr(cls, resolver_name, staticmethod(exporter))
 
 
