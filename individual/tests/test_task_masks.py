@@ -101,6 +101,20 @@ class TaskMasksTest(openIMISGraphQLTestCase):
             self.assertEqual(data["current_data"]["first_name"], MASKED)
             self.assertEqual(data["current_data"]["json_ext"], {"phone": MASKED, "sex": "F"})
 
+    def test_a_masked_location_reads_as_null_in_a_person_update_task(self):
+        self._accept(IndividualService(self.admin).create_update_task({
+            "id": str(self.person.id), "last_name": "Byron", "location_id": self.person.location_id}))
+        with mock.patch.dict(IndividualMask._sources, {"test": lambda: ["location"]}, clear=True):
+            node = self._node(self.reader, "IndividualService")
+        located = [(name, copy, key) for name, value in node.items() for copy in ("incoming_data", "current_data")
+                   for key in ("location", "location_id") if key in value[copy]]
+        self.assertTrue(located)
+        for name, copy, key in located:
+            self.assertIsNone(node[name][copy][key], (name, copy, key))
+        self.assertEqual(node["data"]["incoming_data"]["last_name"], "Byron")
+        node = self._node(self.unmasked, "IndividualService")
+        self.assertEqual(node["data"]["incoming_data"]["location_id"], self.person.location_id)
+
     def test_a_membership_task_shows_the_person_name_and_group_code_masked(self):
         self._membership_update_task()
         node = self._node(self.reader, "GroupIndividualService")

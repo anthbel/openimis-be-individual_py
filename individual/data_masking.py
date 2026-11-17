@@ -24,6 +24,10 @@ NAME_COLUMNS = ("first_name", "last_name")
 GROUP_NAME_KEYS = ("head", "members", "primary_recipient", "secondary_recipient")
 JSON_PREFIX = "json_ext."
 MEMBERSHIP_COLUMNS = ("role", "recipient_type")
+# json_ext keys holding a copy of a column: the location name and code of an upload row, which the upload
+# workflows write into the unit's json_ext, and the location string a person update writes.
+COLUMN_COPY_KEYS = {
+    column: ("location_name", "location_code", "location_str") for column in ("location", "location_id")}
 # Upload row keys holding a membership column: a person row's, and those of each entry of a group row's
 # ``individuals_data``.
 PERSON_ROW_MEMBERSHIP_KEYS = {"role": "individual_role", "recipient_type": "recipient_info"}
@@ -60,7 +64,8 @@ class RegisteredFieldsMask(DataMaskAbs):
     @property
     def anon_fields(self):
         own = list(self.own_fields() or []) if self.own_enabled else []
-        return list(dict.fromkeys(own + self.registered_fields()))
+        fields = list(dict.fromkeys(own + self.registered_fields()))
+        return list(dict.fromkeys(fields + column_copy_paths(fields)))
 
     @property
     def masking_enabled(self):
@@ -74,6 +79,16 @@ class RegisteredFieldsMask(DataMaskAbs):
         if isinstance(value, list):
             return [self.anonymize(item) for item in value]
         return super().anonymize(value)
+
+    def _anonymize_nested_field(self, obj, field_parts):
+        """A masked foreign-key column, by name or column name (``location``, ``location_id``), becomes null:
+        neither the related object nor its key is shown."""
+        if len(field_parts) == 1:
+            foreign_key = _foreign_key(obj, field_parts[0])
+            if foreign_key is not None:
+                setattr(obj, foreign_key.name, None)
+                return obj
+        return super()._anonymize_nested_field(obj, field_parts)
 
 
 class IndividualMask(RegisteredFieldsMask):
@@ -144,6 +159,45 @@ class GroupIndividualMask(RegisteredFieldsMask):
 
 class GroupIndividualHistoryMask(GroupIndividualMask):
     masking_model = 'HistoricalGroupIndividual'
+
+
+def column_copy_paths(fields):
+    """The json_ext paths holding a copy of the columns among ``fields`` (``COLUMN_COPY_KEYS``)."""
+    return [JSON_PREFIX + key for field in fields for key in COLUMN_COPY_KEYS.get(field, ())]
+
+
+def _foreign_key(obj, name):
+    """The many-to-one or one-to-one field of ``obj``'s model named ``name`` or with the column name ``name``,
+    or None."""
+    return _model_foreign_key(type(obj), name)
+
+
+def foreign_key_columns(model, fields):
+    """The name and column name (``location``, ``location_id``) of each foreign key of ``model`` that ``fields``
+    name by either."""
+    columns = set()
+    for field in fields:
+        foreign_key = _model_foreign_key(model, field)
+        if foreign_key is not None:
+            columns |= {foreign_key.name, foreign_key.attname}
+    return columns
+
+
+def _masked_columns(model, fields):
+    """The columns of ``model`` that ``fields`` mask, a foreign key under its name and its column name."""
+    return {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)} | \
+        foreign_key_columns(model, fields)
+
+
+def _model_foreign_key(model, name):
+    meta = getattr(model, "_meta", None)
+    if meta is None:
+        return None
+    try:
+        field = meta.get_field(name)
+    except FieldDoesNotExist:
+        return None
+    return field if field.concrete and (field.many_to_one or field.one_to_one) else None
 
 
 def _is_choice_column(obj, name):
@@ -300,7 +354,7 @@ def reads_masked_field(model, lookup):
             if not path:
                 return bool(masked)
             return any(path == key or path.startswith(f"{key}.") or key.startswith(f"{path}.") for key in masked)
-        if part in {field for field in fields if "." not in field}:
+        if part in {field for field in fields if "." not in field} | foreign_key_columns(model, fields):
             return True
         try:
             field = model._meta.get_field(part)
@@ -464,7 +518,7 @@ def export_column_mask(model, lookup):
                 return value
 
             return mask_inner
-        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+        if part in _masked_columns(model, fields):
             return mask.anonymize
         try:
             field = model._meta.get_field(part)
@@ -557,14 +611,15 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
     """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field the
     string mask where the stored value is a string or is missing (the value itself, or a leaf of its lists and
     objects), naming the field. A leaf given the mask where a number or boolean is stored, a date column given
-    the mask, a masked choice column given null (the form its mask shows), and a masked json_ext key that the
-    update's json_ext leaves out keep their stored value (``obj_data`` is adjusted in place). Any other value is
-    written as given."""
+    the mask, a masked choice column or foreign key given null (the form its mask shows), and a masked json_ext
+    key that the update's json_ext leaves out keep their stored value (``obj_data`` is adjusted in place). Any
+    other value is written as given."""
     if instance is None or may_see_masked(user):
         return
     mask = MaskingClassStorage.get_masking_class(masking_model)
     if mask is None or not mask.masking_enabled:
         return
+    keep_masked_foreign_keys_given_null(mask.anon_fields, instance, obj_data)
     refused = []
     for field in mask.anon_fields:
         name, *path = field.split(".")
@@ -594,6 +649,18 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
     if refused:
         raise ValidationError(
             f"masked value sent back for {', '.join(refused)}: send a new value or leave the field out")
+
+
+def keep_masked_foreign_keys_given_null(fields, instance, obj_data):
+    """Removes from ``obj_data`` the masked foreign keys among ``fields`` given null, by name or column name,
+    where ``instance`` holds one: the mask shows them as null, so they keep their stored value."""
+    for field in fields:
+        foreign_key = _foreign_key(instance, field)
+        if foreign_key is None or getattr(instance, foreign_key.attname) is None:
+            continue
+        for key in (foreign_key.name, foreign_key.attname):
+            if key in obj_data and obj_data[key] is None:
+                del obj_data[key]
 
 
 def masked_row_fields_holding_the_mask(row, masking_model="IndividualDataSource"):

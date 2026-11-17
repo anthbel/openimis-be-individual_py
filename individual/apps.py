@@ -187,6 +187,7 @@ class IndividualConfig(AppConfig):
         register_validator(self.name, self._validate_module_config)
         register_reloader(self.name, self._reload_module_config)
         request_started.connect(self._on_request_started, weak=False, dispatch_uid=f"{MODULE_NAME}_config_refresh")
+        self._refresh_config_per_task()
 
     def _merge_with_defaults(self, instance):
         # `instance._cfg` has already stripped the `_perms` keys from the stored
@@ -217,11 +218,19 @@ class IndividualConfig(AppConfig):
     def _on_request_started(self, sender=None, **kwargs):
         self.refresh_config()
 
+    def _refresh_config_per_task(self):
+        # A Celery task is a request of a worker process: the stored configuration is checked before each one.
+        try:
+            from celery.signals import task_prerun
+        except ImportError:
+            return
+        task_prerun.connect(self._on_request_started, weak=False, dispatch_uid=f"{MODULE_NAME}_config_refresh_task")
+
     def refresh_config(self):
         """Applies the stored configuration when it differs from the one in use, so a configuration saved by
         another process (the person mask fields and individual_schema among it) applies from this process's
-        next request: one query, no reload when unchanged. A failure is logged and the configuration in use
-        stays."""
+        next request or Celery task: one query, no reload when unchanged. A failure is logged and the
+        configuration in use stays."""
         from core.models import ModuleConfiguration
 
         try:

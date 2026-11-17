@@ -1,6 +1,8 @@
+import django_filters
 import graphene
 from django.contrib.auth.models import AnonymousUser
 from graphene_django import DjangoObjectType
+from graphene_django.types import DjangoObjectTypeOptions
 from graphene_django.filter import DjangoFilterConnectionField
 import graphene_django_optimizer as gql_optimizer
 
@@ -15,6 +17,7 @@ from individual.data_masking import (
 from individual.models import Individual, IndividualDataSource, Group, GroupIndividual, \
     IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from core.gql import ScopedQuerysetMixin
+from tasks_management.data_masking import unmasked_json_order_by
 
 
 def _have_permissions(user, permission):
@@ -30,6 +33,55 @@ class JsonExtMixin:
         if _have_permissions(info.context.user, IndividualConfig.gql_individual_search_perms):
             return self.json_ext
         return None
+
+
+class UnmaskedOrderConnectionField(OrderedDjangoFilterConnectionField):
+    """Core's ordered connection leaving out, for a user without the masked-data right, the ``orderBy`` terms
+    whose path traverses a JSON field (``unmasked_json_order_by``: JSON fields hold copies of masked values) or
+    reads a masked field (``unmasked_order_by``), through any relation; the primary key orders last."""
+
+    @classmethod
+    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
+        if args.get("orderBy"):
+            user, model = info.context.user, filterset_class._meta.model
+            args = {**args, "orderBy": unmasked_order_by(
+                user, model, unmasked_json_order_by(user, model, args["orderBy"]))}
+        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
+
+
+class MaskedFilterSet(django_filters.FilterSet):
+    """A filter set refusing to a user without the masked-data right a filter reading a masked field, naming the
+    lookup (``check_filter_lookups``), on every connection using it."""
+
+    def filter_queryset(self, queryset):
+        user = getattr(self.request, "user", None)
+        if user is not None:
+            check_filter_lookups(user, self._meta.model, filter_lookups(type(self), self.form.cleaned_data))
+        return super().filter_queryset(queryset)
+
+
+class MaskedFilterTypeOptions(DjangoObjectTypeOptions):
+    """Options whose filter set, when none is given, is a ``MaskedFilterSet`` of the type's ``filter_fields``;
+    ``DjangoObjectType`` sets ``filter_fields`` before ``filterset_class``."""
+
+    def __setattr__(self, name, value):
+        if name == "filterset_class" and value is None and getattr(self, "filter_fields", None):
+            meta = type("Meta", (), {"model": self.model, "fields": self.filter_fields})
+            value = type(f"{self.class_type.__name__}FilterSet", (MaskedFilterSet,), {"Meta": meta})
+        super().__setattr__(name, value)
+
+
+class MaskedFilterObjectType(DjangoObjectType):
+    """A type whose connections refuse masked-field filters (``MaskedFilterSet``), those other modules nest in
+    their own types included (``LocationGQLType.individuals``, ``UserGQLType.individualUserCreated``); its
+    ``filter_fields`` stay for the types prefixing them."""
+
+    class Meta:
+        abstract = True
+
+    @classmethod
+    def __init_subclass_with_meta__(cls, _meta=None, **options):
+        super().__init_subclass_with_meta__(_meta=_meta or MaskedFilterTypeOptions(cls), **options)
 
 
 class MaskedFilterMixin:
@@ -78,7 +130,7 @@ def _masked_dob(root, info, masking_model):
     return dob.isoformat() if hasattr(dob, "isoformat") else dob
 
 
-class IndividualGQLType(DjangoObjectType):
+class IndividualGQLType(MaskedFilterObjectType):
     """A person, masked by the person mask on every path reaching it for a user without the masked-data
     right; ``dob`` is a string so that it can carry the mask."""
 
@@ -113,7 +165,7 @@ class IndividualGQLType(DjangoObjectType):
         return Individual.get_queryset(queryset, info.context.user)
 
 
-class IndividualHistoryGQLType(DjangoObjectType):
+class IndividualHistoryGQLType(MaskedFilterObjectType):
     """A person record, masked as ``IndividualGQLType`` is."""
 
     uuid = graphene.String(source='uuid')
@@ -185,7 +237,7 @@ class IndividualDataSourceUploadGQLType(ScopedQuerysetMixin, DjangoObjectType):
         connection_class = ExtendedConnection
 
 
-class IndividualDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
+class IndividualDataSourceGQLType(ScopedQuerysetMixin, MaskedFilterObjectType):
     """An upload row, masked with its validation errors by the person mask on every path reaching it."""
 
     uuid = graphene.String(source='uuid')
@@ -206,7 +258,7 @@ class IndividualDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
         connection_class = ExtendedConnection
 
 
-class GroupGQLType(DjangoObjectType):
+class GroupGQLType(MaskedFilterObjectType):
     uuid = graphene.String(source='uuid')
     head = graphene.Field(IndividualGQLType)
     groupindividuals = MaskedFilterConnectionField("individual.gql_queries.GroupIndividualGQLType", required=True)
@@ -239,7 +291,7 @@ class GroupGQLType(DjangoObjectType):
         return Group.get_queryset(queryset, info.context.user)
 
 
-class GroupHistoryGQLType(DjangoObjectType):
+class GroupHistoryGQLType(MaskedFilterObjectType):
     uuid = graphene.String(source='uuid')
     user_updated = graphene.Field(UserGQLType)
     head = graphene.Field(IndividualGQLType)
@@ -276,7 +328,7 @@ class GroupHistoryGQLType(DjangoObjectType):
         return queryset.filter(id__in=accessible_uuids)
 
 
-class GroupIndividualGQLType(DjangoObjectType):
+class GroupIndividualGQLType(MaskedFilterObjectType):
     """A membership, masked by the membership mask on every path reaching it."""
 
     uuid = graphene.String(source='uuid')
@@ -303,7 +355,7 @@ class GroupIndividualGQLType(DjangoObjectType):
         return GroupIndividual.get_queryset(queryset, info.context.user)
 
 
-class GroupIndividualHistoryGQLType(DjangoObjectType):
+class GroupIndividualHistoryGQLType(MaskedFilterObjectType):
     uuid = graphene.String(source='uuid')
     user_updated = graphene.Field(UserGQLType)
 
@@ -353,7 +405,7 @@ class IndividualDataUploadQGLType(ScopedQuerysetMixin, DjangoObjectType, JsonExt
         connection_class = ExtendedConnection
 
 
-class GroupDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
+class GroupDataSourceGQLType(ScopedQuerysetMixin, MaskedFilterObjectType):
     """A group upload row, masked with its validation errors by the group mask on every path reaching it."""
 
     uuid = graphene.String(source='uuid')

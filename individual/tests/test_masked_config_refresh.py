@@ -56,6 +56,16 @@ class MaskConfigurationRefreshTest(RegisteredFieldsTestMixin, openIMISGraphQLTes
         self.store_without_reload(individual_masking_enabled=True, individual_mask_fields=[])
         self.assertEqual(self.phone(), "+257 1")
 
+    def test_a_stored_mask_field_applies_from_the_next_celery_task(self):
+        from celery.signals import task_prerun
+
+        from individual.data_masking import IndividualMask
+
+        self.store_without_reload(individual_masking_enabled=True, individual_mask_fields=["json_ext.phone"])
+        self.assertNotIn("json_ext.phone", IndividualMask().anon_fields)
+        task_prerun.send(sender=None, task_id="mask-refresh", task=None, args=(), kwargs={})
+        self.assertIn("json_ext.phone", IndividualMask().anon_fields)
+
     def test_a_stored_individual_schema_applies_from_the_next_request(self):
         schema = json.dumps({"properties": {"phone": {"type": "string"}}})
         self.phone()

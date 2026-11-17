@@ -1,8 +1,10 @@
+from django.apps import apps
 from django.contrib.contenttypes.models import ContentType
 
 from core.data_masking import DataMaskAbs
 from individual.data_masking import (
-    GroupIndividualMask, GroupMask, IndividualMask, MASK_PLACEHOLDER, NAME_COLUMNS, may_see_masked,
+    GroupIndividualMask, GroupMask, IndividualMask, MASK_PLACEHOLDER, NAME_COLUMNS, foreign_key_columns,
+    may_see_masked,
 )
 from individual.models import Individual
 
@@ -20,19 +22,23 @@ TASK_SOURCE_MASKS = {
 }
 
 
-def _mask_path(mask, value, parts):
-    """Masks in place, by ``mask``, the value at the key path ``parts`` of ``value``, through objects and each
-    item of lists."""
+def _mask_path(replace, value, parts):
+    """Replaces in place the value at the key path ``parts`` of ``value`` by ``replace(value)``, through objects
+    and each item of lists."""
     if isinstance(value, list):
         for item in value:
-            _mask_path(mask, item, parts)
+            _mask_path(replace, item, parts)
         return
     if not isinstance(value, dict) or not parts or parts[0] not in value:
         return
     if len(parts) == 1:
-        value[parts[0]] = mask.anonymize(value[parts[0]])
+        value[parts[0]] = replace(value[parts[0]])
     else:
-        _mask_path(mask, value[parts[0]], parts[1:])
+        _mask_path(replace, value[parts[0]], parts[1:])
+
+
+def _null(value):
+    return None
 
 
 def _masked_names():
@@ -68,9 +74,14 @@ class TaskMask(DataMaskAbs):
         if isinstance(data, dict):
             for mask_class, prefix in TASK_SOURCE_MASKS.get(source, ()):
                 mask = mask_class()
-                for field in mask.anon_fields:
+                fields = mask.anon_fields
+                for field in fields:
                     for key in TASK_DATA_KEYS:
-                        _mask_path(mask, data.get(key), f"{prefix}{field}".split("."))
+                        _mask_path(mask.anonymize, data.get(key), f"{prefix}{field}".split("."))
+                # A masked foreign key reads as null, under its name and its column name.
+                for column in foreign_key_columns(apps.get_model("individual", mask.masking_model), fields):
+                    for key in TASK_DATA_KEYS:
+                        _mask_path(_null, data.get(key), f"{prefix}{column}".split("."))
         masker = TaskMask._maskers.get(source)
         if masker is not None:
             masker(task)
