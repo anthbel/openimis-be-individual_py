@@ -12,6 +12,7 @@ from graphene.types.resolver import dict_or_attr_resolver
 from core.apps import CoreConfig
 from core.data_masking import DataMaskAbs, MaskingClassStorage
 from individual.apps import IndividualConfig
+from tasks_management.data_masking import traverses_json_field
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,35 @@ def unmasked_order_by(user, model, order_by):
     terms = [order_by] if isinstance(order_by, str) else list(order_by)
     kept = terms if may_see_masked(user) else [
         term for term in terms if not any(reads_masked_field(model, lookup) for lookup in order_lookups([term]))]
+    if len(kept) < len(terms):
+        logger.info("orderBy %s of %s left out for a user without the masked-data right",
+                    [term for term in terms if term not in kept], model.__name__)
+    primary_key = model._meta.pk.name
+    if primary_key not in order_lookups(kept):
+        kept = [*kept, primary_key]
+    return kept
+
+
+def reveals_masked_values(model, lookup, aliases=None):
+    """Whether ordering ``model`` by ``lookup`` would tell masked values: its path reads a masked field
+    (``reads_masked_field``) or traverses a JSON field, which holds copies of masked values, or a name that is
+    no field (``traverses_json_field``), through any relation. ``aliases`` maps an annotation of the queryset to
+    the lookup, or the tuple of lookups, it is computed from; an empty tuple reads no stored field."""
+    alias = (aliases or {}).get(lookup, lookup)
+    lookups = (alias,) if isinstance(alias, str) else tuple(alias)
+    return any(reads_masked_field(model, path) or traverses_json_field(model, path) for path in lookups)
+
+
+def masked_order_by(user, model, order_by, aliases=None):
+    """``order_by`` less, for a user without the masked-data right, its terms ``reveals_masked_values`` holds
+    for; each left-out term is logged at info level. The model's primary key orders last, so the order stays
+    total and pages neither repeat nor skip rows."""
+    if not order_by:
+        return order_by
+    terms = [order_by] if isinstance(order_by, str) else list(order_by)
+    kept = terms if may_see_masked(user) else [
+        term for term in terms
+        if not any(reveals_masked_values(model, lookup, aliases) for lookup in order_lookups([term]))]
     if len(kept) < len(terms):
         logger.info("orderBy %s of %s left out for a user without the masked-data right",
                     [term for term in terms if term not in kept], model.__name__)
