@@ -1,5 +1,6 @@
 import copy
 import datetime
+from decimal import Decimal
 
 from django.core.exceptions import FieldDoesNotExist, PermissionDenied, ValidationError
 from graphene.types.resolver import dict_or_attr_resolver
@@ -55,8 +56,10 @@ class RegisteredFieldsMask(DataMaskAbs):
         return bool(self.anon_fields)
 
     def anonymize(self, value):
-        if isinstance(value, (datetime.date, datetime.datetime)):
-            return super().anonymize("")
+        """The string mask for a string, date, number or boolean, at any depth of lists and objects; a number or
+        boolean shown as the mask cannot be taken for a stored value."""
+        if isinstance(value, (datetime.date, datetime.datetime, bool, int, float, Decimal)):
+            return MASK_PLACEHOLDER
         if isinstance(value, list):
             return [self.anonymize(item) for item in value]
         return super().anonymize(value)
@@ -288,12 +291,39 @@ def _holds_placeholder(value):
     return False
 
 
+def _restore_masked_leaves(incoming, stored):
+    """(value, refused) for a value given to a masked field: each leaf holding the string mask where the stored
+    value has a number or boolean takes that stored leaf back; a mask anywhere else is refused."""
+    if isinstance(incoming, str):
+        if incoming == MASK_PLACEHOLDER:
+            if isinstance(stored, (bool, int, float, Decimal)):
+                return copy.deepcopy(stored), False
+            return incoming, True
+        return incoming, False
+    if isinstance(incoming, dict):
+        restored, refused = {}, False
+        for key, item in incoming.items():
+            stored_item = stored.get(key, _ABSENT) if isinstance(stored, dict) else _ABSENT
+            restored[key], item_refused = _restore_masked_leaves(item, stored_item)
+            refused = refused or item_refused
+        return restored, refused
+    if isinstance(incoming, (list, tuple)):
+        restored, refused = [], False
+        for index, item in enumerate(incoming):
+            stored_item = stored[index] if isinstance(stored, (list, tuple)) and index < len(stored) else _ABSENT
+            value, item_refused = _restore_masked_leaves(item, stored_item)
+            restored.append(value)
+            refused = refused or item_refused
+        return restored, refused
+    return incoming, False
+
+
 def check_masked_values_sent_back(user, masking_model, instance, obj_data):
-    """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field a
-    value holding the string mask (the value itself, or a leaf of its lists and objects), naming the field.
-    Another value, a number or boolean equal to what the mask shows included, is written as given. A date column
-    given the mask, and a masked json_ext key that the update's json_ext leaves out, keep their stored value
-    (``obj_data`` is adjusted in place)."""
+    """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field the
+    string mask where the stored value is a string or is missing (the value itself, or a leaf of its lists and
+    objects), naming the field. A leaf given the mask where a number or boolean is stored, a date column given
+    the mask, and a masked json_ext key that the update's json_ext leaves out keep their stored value
+    (``obj_data`` is adjusted in place). Any other value is written as given."""
     if instance is None or may_see_masked(user):
         return
     mask = MaskingClassStorage.get_masking_class(masking_model)
@@ -315,7 +345,13 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
         if not path and isinstance(stored, (datetime.date, datetime.datetime)):
             del obj_data[name]
             continue
-        refused.append(field)
+        restored, field_refused = _restore_masked_leaves(incoming, stored)
+        if field_refused:
+            refused.append(field)
+        elif path:
+            _set_at(obj_data[name], path, restored)
+        else:
+            obj_data[name] = restored
     if refused:
         raise ValidationError(
             f"masked value sent back for {', '.join(refused)}: send a new value or leave the field out")

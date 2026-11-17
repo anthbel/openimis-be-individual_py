@@ -95,11 +95,13 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
             IndividualMask.register_fields("test", None)
             self.assertFalse(IndividualMask().masking_enabled)
 
-    def test_dates_and_lists_are_masked(self):
+    def test_dates_numbers_booleans_and_lists_are_masked_as_the_string_mask(self):
         mask = IndividualMask()
         self.assertEqual(mask.anonymize(datetime.date(1980, 1, 1)), MASKED)
-        self.assertEqual(mask.anonymize(["a", 1]), [MASKED, 0])
-        self.assertEqual(mask.anonymize({"lat": 1.5, "tags": ["x"]}), {"lat": 0, "tags": [MASKED]})
+        self.assertEqual(mask.anonymize(["a", 1, True]), [MASKED, MASKED, MASKED])
+        self.assertEqual(mask.anonymize({"lat": 1.5, "tags": ["x"], "ok": False}),
+                         {"lat": MASKED, "tags": [MASKED], "ok": MASKED})
+        self.assertIsNone(mask.anonymize(None))
 
 
 PERSON_QUERY = """
@@ -164,14 +166,14 @@ class MaskedQueriesTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
             self.assertEqual(person["dob"], MASKED)
         if json_ext is not None:
             self.assertEqual(json_ext["phone"], MASKED)
-            self.assertEqual(json_ext["gps"], {"lat": 0, "lon": 0})
+            self.assertEqual(json_ext["gps"], {"lat": MASKED, "lon": MASKED})
             self.assertEqual(json_ext["educated_level"], MASKED)
             self.assertEqual(json_ext["sex"], "F")
 
     def assert_group_masked(self, group):
         json_ext = json.loads(group["jsonExt"])
         self.assertEqual(group["code"], MASKED)
-        self.assertEqual((json_ext["income"], json_ext["roof"]), (0, "tin"))
+        self.assertEqual((json_ext["income"], json_ext["roof"]), (MASKED, "tin"))
         self.assertEqual((json_ext["phone"], json_ext["head"]), (MASKED, MASKED))
         self.assertEqual(set(json_ext["members"].values()), {MASKED})
 
@@ -194,7 +196,7 @@ class MaskedQueriesTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.assertTrue(history)
         for record in history:
             self.assertEqual(record["code"], MASKED)
-            self.assertEqual(json.loads(record["jsonExt"])["income"], 0)
+            self.assertEqual(json.loads(record["jsonExt"])["income"], MASKED)
             self.assertEqual(record["head"]["firstName"], MASKED)
         [membership] = self.nodes(data, "groupIndividual")
         self.assert_person_masked(membership["individual"])
@@ -337,7 +339,7 @@ class UploadRowMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.assertEqual(notes, {"phone": MASKED, "sex": "'sex' is required"})
         self.assertEqual(row["individual"]["firstName"], MASKED)
         data = json.loads(group_row["jsonExt"])
-        self.assertEqual((data["code"], data["income"], data["roof"]), (MASKED, 0, "tin"))
+        self.assertEqual((data["code"], data["income"], data["roof"]), (MASKED, MASKED, "tin"))
         self.assertEqual(data["individuals_data"][0]["role"], "HEAD")
         self.assertEqual(group_row["group"]["code"], MASKED)
 
@@ -561,6 +563,31 @@ class MaskedValueSentBackTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase
         json_ext = self.person_now().json_ext
         self.assertEqual((json_ext["score"], json_ext["active"]), (0, False))
         self.assertEqual(json_ext["phones"], ["+257 11", "+257 22"])
+
+    def test_a_masked_number_or_boolean_sent_back_as_the_mask_keeps_its_stored_value(self):
+        node = self.update_individual(self.editor, "jsonExt: " + json_arg(
+            {"sex": "M", "score": MASKED, "active": MASKED}))
+        self.assertEqual(node["status"], 2, node["error"])
+        json_ext = self.person_now().json_ext
+        self.assertEqual((json_ext["sex"], json_ext["score"], json_ext["active"]), ("M", 5, True))
+
+    def test_a_masked_object_of_numbers_read_and_sent_back_keeps_its_stored_values(self):
+        from individual.services import GroupService
+
+        Group.objects.filter(id=self.group.id).update(json_ext={"income": 120, "gps": {"x": 1.5, "y": 2.5, "z": 3}})
+        response = self.query('{ group(id: "%s") { edges { node { jsonExt } } } }' % self.group.id,
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[self.editor.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        json_ext = json.loads(content["data"]["group"]["edges"][0]["node"]["jsonExt"])
+        self.assertEqual(json_ext["gps"], {"x": MASKED, "y": MASKED, "z": MASKED})
+        result = GroupService(self.editor).update({"id": self.group.id, "json_ext": copy.deepcopy(json_ext)})
+        self.assertTrue(result["success"], result)
+        self.assertEqual(Group.objects.get(id=self.group.id).json_ext["gps"], {"x": 1.5, "y": 2.5, "z": 3})
+        json_ext["gps"]["y"] = 9.5
+        result = GroupService(self.editor).update({"id": self.group.id, "json_ext": json_ext})
+        self.assertTrue(result["success"], result)
+        self.assertEqual(Group.objects.get(id=self.group.id).json_ext["gps"], {"x": 1.5, "y": 9.5, "z": 3})
 
     def test_the_group_update_and_its_task_refuse_an_object_holding_the_mask(self):
         from individual.services import GroupService
