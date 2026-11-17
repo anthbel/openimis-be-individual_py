@@ -9,7 +9,8 @@ from core.gql_queries import UserGQLType
 from core.schema import OrderedDjangoFilterConnectionField
 from individual.apps import IndividualConfig
 from individual.data_masking import (
-    check_filter_lookups, custom_filter_lookups, filter_lookups, mask_once, masking_resolver, unmasked_order_by,
+    check_filter_lookups, custom_filter_lookups, filter_lookups, mask_once, masked_order_by, masking_resolver,
+    unmasked_order_by,
 )
 from individual.models import Individual, IndividualDataSource, Group, GroupIndividual, \
     IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
@@ -54,6 +55,22 @@ class MaskedOrderedFilterConnectionField(MaskedFilterMixin, OrderedDjangoFilterC
 
 class MaskedFilterConnectionField(MaskedFilterMixin, DjangoFilterConnectionField):
     pass
+
+
+class MaskedOrderedConnectionField(OrderedDjangoFilterConnectionField):
+    """Core's ordered connection leaving out, for a user without the masked-data right, the ``orderBy`` terms
+    whose path reads a masked field or traverses a JSON field through any relation (``masked_order_by``); the
+    primary key orders last. ``order_aliases`` maps an annotation the resolver adds to the lookup, or tuple of
+    lookups, it is computed from; a subclass sets it for its annotations."""
+
+    order_aliases = {}
+
+    @classmethod
+    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
+        if args.get("orderBy"):
+            args = {**args, "orderBy": masked_order_by(
+                info.context.user, filterset_class._meta.model, args["orderBy"], cls.order_aliases)}
+        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
 
 
 def _masked_dob(root, info, masking_model):

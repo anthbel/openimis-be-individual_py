@@ -271,20 +271,36 @@ def _json_path(parts):
     return ".".join(parts)
 
 
+def _reads_relation_path(parts, path):
+    """Whether the lookup ``parts`` read the dotted mask field ``path`` that reaches a related model's field
+    (``group.code``, ``group.json_ext.income``): they reach it or a part of it, or a ``json_ext`` holding it."""
+    path = path.split(".")
+    if "json_ext" in parts:
+        start = parts.index("json_ext") + 1
+        parts = [*parts[:start], *filter(None, _json_path(parts[start:]).split("."))]
+    if parts[:len(path)] == path:
+        return True
+    return path[:len(parts)] == parts and "json_ext" in parts
+
+
 def reads_masked_field(model, lookup):
     """Whether the ``__`` lookup ``lookup`` from ``model`` reads a field the mask registered for a model it
-    reaches masks; a whole ``json_ext`` is masked while any of its paths is."""
+    reaches masks; a whole ``json_ext`` is masked while any of its paths is. A mask field is a column, a
+    ``json_ext.<key>`` path, or a dotted path through a relation (``group.code``)."""
     parts = lookup.split("__")
     for index, part in enumerate(parts):
         mask = MaskingClassStorage.get_masking_class(model.__name__)
         fields = mask.anon_fields if mask is not None and mask.masking_enabled else []
+        relation_paths = [field for field in fields if "." in field and not field.startswith(JSON_PREFIX)]
+        if any(_reads_relation_path(parts[index:], path) for path in relation_paths):
+            return True
         if part == "json_ext" and fields:
             path = _json_path(parts[index + 1:])
             masked = [field[len(JSON_PREFIX):] for field in fields if field.startswith(JSON_PREFIX)]
             if not path:
                 return bool(masked)
             return any(path == key or path.startswith(f"{key}.") or key.startswith(f"{path}.") for key in masked)
-        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+        if part in {field for field in fields if "." not in field}:
             return True
         try:
             field = model._meta.get_field(part)
@@ -341,6 +357,54 @@ def unmasked_order_by(user, model, order_by):
     terms = [order_by] if isinstance(order_by, str) else list(order_by)
     kept = terms if may_see_masked(user) else [
         term for term in terms if not any(reads_masked_field(model, lookup) for lookup in order_lookups([term]))]
+    if len(kept) < len(terms):
+        logger.info("orderBy %s of %s left out for a user without the masked-data right",
+                    [term for term in terms if term not in kept], model.__name__)
+    primary_key = model._meta.pk.name
+    if primary_key not in order_lookups(kept):
+        kept = [*kept, primary_key]
+    return kept
+
+
+def _crosses_undescribed_json(model, lookup):
+    """Whether ``lookup`` from ``model`` traverses, through its relations, a JSON field no mask describes (any
+    JSON field but the ``json_ext`` of a model with a registered mask), or a name that is no field."""
+    for part in lookup.split("__"):
+        if model is None:
+            return True
+        try:
+            field = model._meta.get_field(part)
+        except FieldDoesNotExist:
+            return True
+        if isinstance(field, JSONField):
+            return part != "json_ext" or MaskingClassStorage.get_masking_class(model.__name__) is None
+        if not field.is_relation:
+            return False
+        model = field.related_model
+    return False
+
+
+def reveals_masked_values(model, lookup, aliases=None):
+    """Whether ordering ``model`` by ``lookup`` would tell masked values: its path reads a masked field, a
+    masked ``json_ext`` key of a masked model included (``reads_masked_field``), or traverses a JSON field no
+    mask describes, which may hold copies of masked values, or a name that is no field, through any relation.
+    ``aliases`` maps an annotation of the queryset to the lookup, or the tuple of lookups, it is computed from;
+    an empty tuple reads no stored field."""
+    alias = (aliases or {}).get(lookup, lookup)
+    lookups = (alias,) if isinstance(alias, str) else tuple(alias)
+    return any(reads_masked_field(model, path) or _crosses_undescribed_json(model, path) for path in lookups)
+
+
+def masked_order_by(user, model, order_by, aliases=None):
+    """``order_by`` less, for a user without the masked-data right, its terms ``reveals_masked_values`` holds
+    for; each left-out term is logged at info level. The model's primary key orders last, so the order stays
+    total and pages neither repeat nor skip rows."""
+    if not order_by:
+        return order_by
+    terms = [order_by] if isinstance(order_by, str) else list(order_by)
+    kept = terms if may_see_masked(user) else [
+        term for term in terms
+        if not any(reveals_masked_values(model, lookup, aliases) for lookup in order_lookups([term]))]
     if len(kept) < len(terms):
         logger.info("orderBy %s of %s left out for a user without the masked-data right",
                     [term for term in terms if term not in kept], model.__name__)
