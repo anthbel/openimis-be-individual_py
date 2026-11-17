@@ -7,7 +7,8 @@ from django.test.utils import CaptureQueriesContext
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user
 from individual.models import (
-    Group, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload, IndividualDataUploadRecords,
+    Group, GroupDataSource, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload,
+    IndividualDataUploadRecords,
 )
 from individual.tests.test_data_masking import SEARCH_PERMS, RegisteredFieldsTestMixin
 from location.test_helpers import create_test_village
@@ -201,6 +202,24 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                             for order in self.order_sql(self.viewer, query % "sourceName", table)))
         self.assertTrue(any("'sex'" in order and f'"{table}"."UUID" ASC' in order for order in self.order_sql(
             self.viewer, query % "-individualdatasource__jsonExt__sex", table)))
+
+    def test_an_ordering_through_a_list_index_on_a_masked_key_is_left_out(self):
+        from individual.data_masking import reads_masked_field
+
+        GroupDataSource(upload=self.upload, group=self.group, json_ext={
+            "code": "MK-F1", "individuals_data": [{"role": "HEAD"}, {"role": "SON"}]}).save(user=self.unmasked)
+        self.assertTrue(reads_masked_field(GroupDataSource, "json_ext__individuals_data__0__role"))
+        self.assertTrue(reads_masked_field(GroupDataSource, "json_ext__individuals_data__1"))
+        self.assertFalse(reads_masked_field(GroupDataSource, "json_ext__individuals_data__0__sex"))
+        table = "individual_groupdatasource"
+        query = ('{ groupDataSource(upload_Id: "%(upload)s", orderBy: ["jsonExt__individualsData__0__role"]) '
+                 '{ edges { node { id } } } }')
+        orders = self.order_sql(self.viewer, query, table)
+        self.assertTrue(orders)
+        for order in orders:
+            self.assertNotIn("individuals_data", order)
+            self.assertIn(f'"{table}"."UUID" ASC', order)
+        self.assertTrue(any("individuals_data" in order for order in self.order_sql(self.unmasked, query, table)))
 
     def test_a_data_source_ordering_crossing_a_json_field_no_mask_describes_is_left_out(self):
         table = "individual_individualdatasource"

@@ -319,10 +319,10 @@ def masking_resolver(masking_model):
 
 def _json_path(parts):
     """The json_ext path the lookup parts after ``json_ext`` read; a trailing lookup name (icontains, lt, ...)
-    is not a key."""
+    is not a key, and a numeric part indexes a list, as a mask path reaches each item of a list."""
     if parts and (JSONField.get_lookups().get(parts[-1]) or KeyTransform.get_lookups().get(parts[-1])):
         parts = parts[:-1]
-    return ".".join(parts)
+    return ".".join(part for part in parts if not part.isdigit())
 
 
 def _reads_relation_path(parts, path):
