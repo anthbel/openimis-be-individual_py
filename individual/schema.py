@@ -458,7 +458,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
             wait_for_mutation(client_mutation_id)
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
-        query = GroupIndividual.objects.filter(*filters)
+        query = GroupIndividualGQLType.get_queryset(None, info).filter(*filters)
         return gql_optimizer.query(query, info)
 
     def resolve_group_individual_history(self, info, **kwargs):

@@ -74,7 +74,7 @@ class Individual(HistoryModel):
                 )
             ))
             if cls._location_scoped(user):
-                queryset = queryset.exclude(cls._deleted_without_location())
+                queryset = queryset.filter(~cls._deleted_without_location("id"))
             return queryset
 
         return queryset
@@ -86,12 +86,14 @@ class Individual(HistoryModel):
 
         return isinstance(user._u, InteractiveUser) and not user._u.is_superuser
 
-    @staticmethod
-    def _deleted_without_location():
-        """``Q`` on the soft-deleted persons with no location of their own and no household with a location: no
-        location places them in a location-scoped user's rows."""
-        in_located_household = GroupIndividual.objects.filter(group__location__isnull=False).values("individual_id")
-        return Q(is_deleted=True, location__isnull=True) & ~Q(id__in=in_located_household)
+    @classmethod
+    def _deleted_without_location(cls, person):
+        """``Exists`` on the person the outer field ``person`` holds being soft-deleted with no location of their own
+        and no household with a location: no location places them in a location-scoped user's rows."""
+        in_located_household = GroupIndividual.objects.filter(individual_id=OuterRef("id"),
+                                                              group__location__isnull=False)
+        return Exists(cls.objects.filter(id=OuterRef(person), is_deleted=True, location__isnull=True)
+                      .filter(~Exists(in_located_household)))
 
 
 class IndividualDataSourceUpload(HistoryModel):
@@ -346,11 +348,22 @@ class GroupIndividual(HistoryModel):
             return queryset.filter(id=-1)
 
         if not user.is_imis_admin:
-            return queryset.filter(
+            queryset = queryset.filter(
                 LocationManager().build_user_location_filter_query(
                     user._u,
                     prefix='group__location',
                     loc_types=LocationConfig.location_types,
                 )
             )
+            return cls.without_hidden_persons(queryset, user)
         return queryset
+
+    @classmethod
+    def without_hidden_persons(cls, queryset, user):
+        """``queryset`` of rows pointing at a person (``individual``) minus those whose person
+        ``Individual.get_queryset`` hides from ``user``."""
+        if not settings.ROW_SECURITY or user.is_anonymous or user.is_imis_admin:
+            return queryset
+        if not Individual._location_scoped(user):
+            return queryset
+        return queryset.filter(~Individual._deleted_without_location("individual_id"))

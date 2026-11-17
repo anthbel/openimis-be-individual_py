@@ -373,7 +373,8 @@ class GroupIndividualHistoryGQLType(MaskedFilterObjectType):
         accessible_group_query = Group.get_queryset(None, info.context.user)
         accessible_groups = gql_optimizer.query(accessible_group_query, info)
         accessible_uuids = set(accessible_groups.values_list('uuid', flat=True))
-        return queryset.filter(group__id__in=accessible_uuids)
+        return GroupIndividual.without_hidden_persons(
+            queryset.filter(group__id__in=accessible_uuids), info.context.user)
 
 
 class IndividualDataUploadQGLType(ScopedQuerysetMixin, DjangoObjectType, JsonExtMixin):
