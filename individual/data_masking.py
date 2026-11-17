@@ -1,12 +1,19 @@
 import copy
 import datetime
+import logging
+import math
+from decimal import Decimal
 
 from django.core.exceptions import FieldDoesNotExist, PermissionDenied, ValidationError
+from django.db.models import JSONField
+from django.db.models.fields.json import KeyTransform
 from graphene.types.resolver import dict_or_attr_resolver
 
 from core.apps import CoreConfig
 from core.data_masking import DataMaskAbs, MaskingClassStorage
 from individual.apps import IndividualConfig
+
+logger = logging.getLogger(__name__)
 
 MASK_PLACEHOLDER = DataMaskAbs().anonymize("")
 _ABSENT = object()
@@ -16,6 +23,11 @@ _ABSENT = object()
 NAME_COLUMNS = ("first_name", "last_name")
 GROUP_NAME_KEYS = ("head", "members", "primary_recipient", "secondary_recipient")
 JSON_PREFIX = "json_ext."
+MEMBERSHIP_COLUMNS = ("role", "recipient_type")
+# Upload row keys holding a membership column: a person row's, and those of each entry of a group row's
+# ``individuals_data``.
+PERSON_ROW_MEMBERSHIP_KEYS = {"role": "individual_role", "recipient_type": "recipient_info"}
+GROUP_ROW_MEMBERS_KEY = "individuals_data"
 
 
 class RegisteredFieldsMask(DataMaskAbs):
@@ -55,16 +67,26 @@ class RegisteredFieldsMask(DataMaskAbs):
         return bool(self.anon_fields)
 
     def anonymize(self, value):
-        if isinstance(value, (datetime.date, datetime.datetime)):
-            return super().anonymize("")
+        """The string mask for a string, date, number or boolean, at any depth of lists and objects; a number or
+        boolean shown as the mask cannot be taken for a stored value."""
+        if isinstance(value, (datetime.date, datetime.datetime, bool, int, float, Decimal)):
+            return MASK_PLACEHOLDER
         if isinstance(value, list):
             return [self.anonymize(item) for item in value]
         return super().anonymize(value)
 
 
 class IndividualMask(RegisteredFieldsMask):
+    """The person mask. A masked column masks the ``json_ext`` key of the same name too: the upload workflows
+    write the whole upload row, the person's columns included, into the person's ``json_ext``."""
+
     masking_model = 'Individual'
     _sources = {}
+
+    @property
+    def anon_fields(self):
+        fields = super().anon_fields
+        return list(dict.fromkeys(fields + [JSON_PREFIX + field for field in fields if "." not in field]))
 
     @property
     def own_enabled(self):
@@ -136,14 +158,29 @@ def _is_choice_column(obj, name):
 
 class UploadRowMask(DataMaskAbs):
     """An upload row (a data source's json_ext, holding its unit's columns and json_ext keys at its top level)
-    masked by the mask of its unit, with the note of a validation error on a masked key."""
+    masked by the mask of its unit and, for the row keys holding a membership column, by the membership mask,
+    with the note of a validation error on a masked key. A path reaching a list masks each of its objects."""
 
     unit_mask = None
 
     @property
     def anon_fields(self):
-        return [JSON_PREFIX + (field[len(JSON_PREFIX):] if field.startswith(JSON_PREFIX) else field)
-                for field in self.unit_mask().anon_fields]
+        unit_fields = [JSON_PREFIX + (field[len(JSON_PREFIX):] if field.startswith(JSON_PREFIX) else field)
+                       for field in self.unit_mask().anon_fields]
+        membership = [field for field in GroupIndividualMask().anon_fields if field in MEMBERSHIP_COLUMNS]
+        return list(dict.fromkeys(unit_fields + [JSON_PREFIX + key for key in self.membership_keys(membership)]))
+
+    def membership_keys(self, columns):
+        """The row paths holding the masked membership ``columns``."""
+        return []
+
+    def _anonymize_dict_field(self, dictionary, field_parts):
+        if len(field_parts) > 1 and isinstance(dictionary.get(field_parts[0]), list):
+            for item in dictionary[field_parts[0]]:
+                if isinstance(item, dict):
+                    self._anonymize_dict_field(item, field_parts[1:])
+            return
+        super()._anonymize_dict_field(dictionary, field_parts)
 
     @property
     def masking_enabled(self):
@@ -169,10 +206,16 @@ class IndividualUploadRowMask(UploadRowMask):
     masking_model = 'IndividualDataSource'
     unit_mask = IndividualMask
 
+    def membership_keys(self, columns):
+        return [PERSON_ROW_MEMBERSHIP_KEYS[column] for column in columns]
+
 
 class GroupUploadRowMask(UploadRowMask):
     masking_model = 'GroupDataSource'
     unit_mask = GroupMask
+
+    def membership_keys(self, columns):
+        return [f"{GROUP_ROW_MEMBERS_KEY}.{column}" for column in columns]
 
 
 def may_see_masked(user):
@@ -220,6 +263,14 @@ def masking_resolver(masking_model):
     return resolve
 
 
+def _json_path(parts):
+    """The json_ext path the lookup parts after ``json_ext`` read; a trailing lookup name (icontains, lt, ...)
+    is not a key."""
+    if parts and (JSONField.get_lookups().get(parts[-1]) or KeyTransform.get_lookups().get(parts[-1])):
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
 def reads_masked_field(model, lookup):
     """Whether the ``__`` lookup ``lookup`` from ``model`` reads a field the mask registered for a model it
     reaches masks; a whole ``json_ext`` is masked while any of its paths is."""
@@ -228,7 +279,7 @@ def reads_masked_field(model, lookup):
         mask = MaskingClassStorage.get_masking_class(model.__name__)
         fields = mask.anon_fields if mask is not None and mask.masking_enabled else []
         if part == "json_ext" and fields:
-            path = ".".join(parts[index + 1:])
+            path = _json_path(parts[index + 1:])
             masked = [field[len(JSON_PREFIX):] for field in fields if field.startswith(JSON_PREFIX)]
             if not path:
                 return bool(masked)
@@ -245,14 +296,137 @@ def reads_masked_field(model, lookup):
     return False
 
 
-def check_export_columns(user, model, lookups):
-    """Refuses an export column reading a masked field to a user without the masked-data right: an export
-    reads the stored values, which no mask reaches."""
+def check_filter_lookups(user, model, lookups):
+    """Refuses to a user without the masked-data right a filter or an ordering on ``model`` by a lookup reading
+    a masked field, naming the lookup: its results would tell the masked values."""
     if may_see_masked(user):
         return
     for lookup in lookups:
-        if reads_masked_field(model, lookup):
-            raise PermissionDenied(f"the column {lookup} needs the right to view masked data")
+        if lookup and reads_masked_field(model, lookup):
+            raise PermissionDenied(f"filtering or ordering on {lookup} needs the right to view masked data")
+
+
+_EMPTY_FILTER_VALUES = ([], (), {}, "", None)
+
+
+def filter_lookups(filterset_class, args):
+    """The model lookups of the filter arguments set in ``args``, as ``filterset_class`` applies them."""
+    filters = filterset_class.base_filters
+    return [filters[name].field_name for name, value in args.items()
+            if name in filters and value not in _EMPTY_FILTER_VALUES]
+
+
+def order_lookups(order_by):
+    """The model lookups of an ``orderBy`` argument, as core's ordered connection applies it."""
+    from graphene.utils.str_converters import to_snake_case
+    from core.schema import OrderedDjangoFilterConnectionField
+
+    if not order_by:
+        return []
+    lookups = []
+    for order in [order_by] if isinstance(order_by, str) else order_by:
+        if order == "?":
+            continue
+        cleaned = to_snake_case(OrderedDjangoFilterConnectionField._filter_order_by(order) or "")
+        lookups += [part.lstrip("-+") for part in cleaned.split(",")]
+    return lookups
+
+
+def unmasked_order_by(user, model, order_by):
+    """``order_by`` less its terms ordering by a masked field, for a user without the masked-data right: such an
+    ordering would tell the masked values, and leaving it out keeps the list readable. The model's primary key
+    orders last, so the order stays total and pages neither repeat nor skip rows."""
+    if not order_by:
+        return order_by
+    terms = [order_by] if isinstance(order_by, str) else list(order_by)
+    kept = terms if may_see_masked(user) else [
+        term for term in terms if not any(reads_masked_field(model, lookup) for lookup in order_lookups([term]))]
+    if len(kept) < len(terms):
+        logger.info("orderBy %s of %s left out for a user without the masked-data right",
+                    [term for term in terms if term not in kept], model.__name__)
+    primary_key = model._meta.pk.name
+    if primary_key not in order_lookups(kept):
+        kept = [*kept, primary_key]
+    return kept
+
+
+def custom_filter_lookups(custom_filters, relation=None):
+    """The model lookups of ``customFilters`` conditions, as individual's custom filter wizards apply them."""
+    from individual.custom_filters import IndividualCustomFilterWizard
+
+    lookups = []
+    for condition in custom_filters or []:
+        field_and_filter, _, _ = IndividualCustomFilterWizard.parse_condition(condition)
+        lookup = f"json_ext__{field_and_filter}"
+        lookups.append(f"{relation}__{lookup}" if relation else lookup)
+    return lookups
+
+
+def _mask_at(mask, value, path):
+    """``value`` with the value at the ``.`` path ``path`` masked by ``mask``, through objects and each item of
+    lists; a copy."""
+    if not path:
+        return mask.anonymize(value)
+    if isinstance(value, list):
+        return [_mask_at(mask, item, path) for item in value]
+    if isinstance(value, dict):
+        key, _, rest = path.partition(".")
+        return {name: _mask_at(mask, item, rest) if name == key else copy.deepcopy(item)
+                for name, item in value.items()}
+    return value
+
+
+def export_column_mask(model, lookup):
+    """A function masking the values of the export column ``lookup`` from ``model`` as the mask registered for
+    the model it reaches masks them, or None when the column reads no masked field. A column of a masked field
+    or under a masked path is masked whole; a ``json_ext`` column or path holding masked paths has those masked.
+    A column that names no field (an annotation, a misspelt path) may read anything, so it is masked whole."""
+    parts = lookup.split("__")
+    for index, part in enumerate(parts):
+        mask = MaskingClassStorage.get_masking_class(model.__name__)
+        fields = mask.anon_fields if mask is not None and mask.masking_enabled else []
+        if part == "json_ext" and fields:
+            path = ".".join(parts[index + 1:])
+            masked = [field[len(JSON_PREFIX):] for field in fields if field.startswith(JSON_PREFIX)]
+            if path and any(path == key or path.startswith(f"{key}.") for key in masked):
+                return mask.anonymize
+            inner = [key[len(path) + 1:] if path else key for key in masked if not path or key.startswith(f"{path}.")]
+            if not inner:
+                return None
+
+            def mask_inner(value, mask=mask, inner=inner):
+                for key in inner:
+                    value = _mask_at(mask, value, key)
+                return value
+
+            return mask_inner
+        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+            return mask.anonymize
+        try:
+            field = model._meta.get_field(part)
+        except FieldDoesNotExist:
+            return RegisteredFieldsMask().anonymize
+        if not field.is_relation:
+            return None
+        model = field.related_model
+    return None
+
+
+def _is_null(value):
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
+def mask_export_columns(model, user, data_frame):
+    """``data_frame``, an export table with one column per lookup from ``model``, with the values of the columns
+    reading a masked field masked, unless ``user`` may see masked data. An export reads the stored values, which
+    no other mask reaches; without a user the columns are masked."""
+    if user is not None and may_see_masked(user):
+        return data_frame
+    for column in data_frame.columns:
+        masker = export_column_mask(model, column)
+        if masker is not None:
+            data_frame[column] = data_frame[column].map(lambda value: value if _is_null(value) else masker(value))
+    return data_frame
 
 
 def _value_at(value, path):
@@ -277,23 +451,51 @@ def _equal(left, right):
         return False
 
 
-def _holds_placeholder(value):
+def holds_mask_placeholder(value):
     """Whether ``value`` is the string mask or holds it as a leaf of its lists and objects, at any depth."""
     if isinstance(value, str):
         return value == MASK_PLACEHOLDER
     if isinstance(value, dict):
-        return any(_holds_placeholder(item) for item in value.values())
+        return any(holds_mask_placeholder(item) for item in value.values())
     if isinstance(value, (list, tuple)):
-        return any(_holds_placeholder(item) for item in value)
+        return any(holds_mask_placeholder(item) for item in value)
     return False
 
 
+def _restore_masked_leaves(incoming, stored):
+    """(value, refused) for a value given to a masked field: each leaf holding the string mask where the stored
+    value has a number or boolean takes that stored leaf back; a mask anywhere else is refused."""
+    if isinstance(incoming, str):
+        if incoming == MASK_PLACEHOLDER:
+            if isinstance(stored, (bool, int, float, Decimal)):
+                return copy.deepcopy(stored), False
+            return incoming, True
+        return incoming, False
+    if isinstance(incoming, dict):
+        restored, refused = {}, False
+        for key, item in incoming.items():
+            stored_item = stored.get(key, _ABSENT) if isinstance(stored, dict) else _ABSENT
+            restored[key], item_refused = _restore_masked_leaves(item, stored_item)
+            refused = refused or item_refused
+        return restored, refused
+    if isinstance(incoming, (list, tuple)):
+        restored, refused = [], False
+        for index, item in enumerate(incoming):
+            stored_item = stored[index] if isinstance(stored, (list, tuple)) and index < len(stored) else _ABSENT
+            value, item_refused = _restore_masked_leaves(item, stored_item)
+            restored.append(value)
+            refused = refused or item_refused
+        return restored, refused
+    return incoming, False
+
+
 def check_masked_values_sent_back(user, masking_model, instance, obj_data):
-    """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field a
-    value holding the string mask (the value itself, or a leaf of its lists and objects), naming the field.
-    Another value, a number or boolean equal to what the mask shows included, is written as given. A date column
-    given the mask, and a masked json_ext key that the update's json_ext leaves out, keep their stored value
-    (``obj_data`` is adjusted in place)."""
+    """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field the
+    string mask where the stored value is a string or is missing (the value itself, or a leaf of its lists and
+    objects), naming the field. A leaf given the mask where a number or boolean is stored, a date column given
+    the mask, a masked choice column given null (the form its mask shows), and a masked json_ext key that the
+    update's json_ext leaves out keep their stored value (``obj_data`` is adjusted in place). Any other value is
+    written as given."""
     if instance is None or may_see_masked(user):
         return
     mask = MaskingClassStorage.get_masking_class(masking_model)
@@ -306,16 +508,39 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
             continue
         stored = _value_at(getattr(instance, name, None), path)
         incoming = _value_at(obj_data[name], path)
+        if not path and incoming is None and stored is not None and _is_choice_column(instance, name):
+            del obj_data[name]
+            continue
         if incoming is _ABSENT:
             if path and isinstance(obj_data[name], dict) and stored is not _ABSENT:
                 _set_at(obj_data[name], path, copy.deepcopy(stored))
             continue
-        if not _holds_placeholder(incoming) or _equal(incoming, stored):
+        if not holds_mask_placeholder(incoming) or _equal(incoming, stored):
             continue
         if not path and isinstance(stored, (datetime.date, datetime.datetime)):
             del obj_data[name]
             continue
-        refused.append(field)
+        restored, field_refused = _restore_masked_leaves(incoming, stored)
+        if field_refused:
+            refused.append(field)
+        elif path:
+            _set_at(obj_data[name], path, restored)
+        else:
+            obj_data[name] = restored
     if refused:
         raise ValidationError(
             f"masked value sent back for {', '.join(refused)}: send a new value or leave the field out")
+
+
+def masked_row_fields_holding_the_mask(row, masking_model="IndividualDataSource"):
+    """The masked keys of the upload row ``row`` (its values by key) whose value holds the string mask."""
+    mask = MaskingClassStorage.get_masking_class(masking_model)
+    if mask is None or not mask.masking_enabled:
+        return []
+    fields = []
+    for field in mask.anon_fields:
+        key, *path = field[len(JSON_PREFIX):].split(".")
+        value = _value_at(row.get(key, _ABSENT) if isinstance(row, dict) else _ABSENT, path)
+        if value is not _ABSENT and holds_mask_placeholder(value) and key not in fields:
+            fields.append(key)
+    return fields

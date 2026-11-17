@@ -1,12 +1,16 @@
 import graphene
 from django.contrib.auth.models import AnonymousUser
 from graphene_django import DjangoObjectType
+from graphene_django.filter import DjangoFilterConnectionField
 import graphene_django_optimizer as gql_optimizer
 
 from core import prefix_filterset, ExtendedConnection
 from core.gql_queries import UserGQLType
+from core.schema import OrderedDjangoFilterConnectionField
 from individual.apps import IndividualConfig
-from individual.data_masking import mask_once, masking_resolver
+from individual.data_masking import (
+    check_filter_lookups, custom_filter_lookups, filter_lookups, mask_once, masking_resolver, unmasked_order_by,
+)
 from individual.models import Individual, IndividualDataSource, Group, GroupIndividual, \
     IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from core.gql import ScopedQuerysetMixin
@@ -27,6 +31,31 @@ class JsonExtMixin:
         return None
 
 
+class MaskedFilterMixin:
+    """A connection refusing to a user without the masked-data right its filter arguments and ``customFilters``
+    when they read a masked field (``check_filter_lookups``), and leaving out the ``orderBy`` terms ordering by
+    one (``unmasked_order_by``)."""
+
+    @classmethod
+    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
+        user, model = info.context.user, filterset_class._meta.model
+        lookups = filter_lookups(filterset_class, {name: value for name, value in args.items()
+                                                   if name in filtering_args})
+        lookups += custom_filter_lookups(args.get("customFilters"))
+        check_filter_lookups(user, model, lookups)
+        if args.get("orderBy"):
+            args = {**args, "orderBy": unmasked_order_by(user, model, args["orderBy"])}
+        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
+
+
+class MaskedOrderedFilterConnectionField(MaskedFilterMixin, OrderedDjangoFilterConnectionField):
+    pass
+
+
+class MaskedFilterConnectionField(MaskedFilterMixin, DjangoFilterConnectionField):
+    pass
+
+
 def _masked_dob(root, info, masking_model):
     dob = mask_once(info, root, masking_model).dob
     return dob.isoformat() if hasattr(dob, "isoformat") else dob
@@ -38,6 +67,9 @@ class IndividualGQLType(DjangoObjectType):
 
     uuid = graphene.String(source='uuid')
     dob = graphene.String(required=True, description="YYYY-MM-DD, or the mask when masked")
+    groupindividuals = MaskedFilterConnectionField("individual.gql_queries.GroupIndividualGQLType", required=True)
+    individualdatasource_set = MaskedFilterConnectionField(
+        "individual.gql_queries.IndividualDataSourceGQLType", required=True)
 
     def resolve_dob(self, info):
         return _masked_dob(self, info, "Individual")
@@ -106,6 +138,9 @@ class IndividualDataSourceUploadGQLType(ScopedQuerysetMixin, DjangoObjectType):
     uuid = graphene.String(source='uuid')
     json_ext = graphene.JSONString()
     progress = graphene.JSONString()
+    individualdatasource_set = MaskedFilterConnectionField(
+        "individual.gql_queries.IndividualDataSourceGQLType", required=True)
+    groupdatasource_set = MaskedFilterConnectionField("individual.gql_queries.GroupDataSourceGQLType", required=True)
 
     def resolve_json_ext(self, info):
         from individual.import_pipeline import public_json_ext
@@ -157,6 +192,8 @@ class IndividualDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
 class GroupGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
     head = graphene.Field(IndividualGQLType)
+    groupindividuals = MaskedFilterConnectionField("individual.gql_queries.GroupIndividualGQLType", required=True)
+    groupdatasource_set = MaskedFilterConnectionField("individual.gql_queries.GroupDataSourceGQLType", required=True)
 
     def resolve_head(self, info):
         return Individual.objects.filter(

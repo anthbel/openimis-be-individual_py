@@ -18,7 +18,8 @@ from django.apps import apps
 # from django.utils.translation import gettext as _
 from django.db.models import Q, OuterRef, Subquery, Count
 from individual.apps import IndividualConfig
-from individual.data_masking import check_masked_values_sent_back
+from individual.data_masking import check_filter_lookups, check_masked_values_sent_back, custom_filter_lookups, \
+    masked_row_fields_holding_the_mask
 from individual.models import (
     Individual,
     IndividualDataSource,
@@ -102,6 +103,7 @@ class IndividualService(BaseService, UpdateCheckerLogicServiceMixin, DeleteCheck
 
     @register_service_signal('individual_service.select_individuals_to_benefit_plan')
     def select_individuals_to_benefit_plan(self, custom_filters, benefit_plan_id, status, user):
+        check_filter_lookups(user, Individual, custom_filter_lookups(custom_filters))
         individual_query = Individual.objects.filter(is_deleted=False)
         subquery = GroupIndividual.objects.filter(
             individual=OuterRef('pk')
@@ -350,6 +352,7 @@ class GroupService(
 
     @register_service_signal('group_service.select_groups_to_benefit_plan')
     def select_groups_to_benefit_plan(self, custom_filters, benefit_plan_id, status, user):
+        check_filter_lookups(user, Group, custom_filter_lookups(custom_filters))
         group_query = Group.objects.filter(is_deleted=False)
         # criteria will be based on head of the group
         group_query_with_filters = CustomFilterWizardStorage.build_custom_filters_queryset(
@@ -428,11 +431,20 @@ class GroupIndividualService(BaseService, UpdateCheckerLogicServiceMixin):
     def create(self, obj_data):
         return super().create(obj_data)
 
+    def create_update_task(self, obj_data):
+        refused = refuse_masked_values_sent_back(self, "GroupIndividual", obj_data)
+        if refused:
+            return refused
+        return super().create_update_task(obj_data)
+
     @check_authentication
     @register_service_signal('groupindividual_service.update')
     def update(self, obj_data):
         try:
             with transaction.atomic():
+                refused = refuse_masked_values_sent_back(self, "GroupIndividual", obj_data)
+                if refused:
+                    return refused
                 group_individual_id = obj_data.get('id')
                 incoming_group_id = obj_data.get('group_id')
                 group_individual = GroupIndividual.objects.filter(id=group_individual_id, is_deleted=False).first()
@@ -686,11 +698,14 @@ class IndividualImportService:
         )
         record.save(user=self.user)
 
-    def validate_import_individuals(self, upload_id: uuid, individual_sources):
+    def validate_import_individuals(self, upload_id: uuid, individual_sources, refuse_mask_placeholder=False):
+        """Validates the upload rows and stores their errors; ``refuse_mask_placeholder`` refuses a row whose
+        masked field holds the string mask (an update upload, where it would replace the stored value)."""
         dataframe = load_dataframe(individual_sources)
         validated_dataframe, invalid_items = self._validate_possible_individuals(
             dataframe,
-            upload_id
+            upload_id,
+            refuse_mask_placeholder,
         )
         return {'success': True, 'data': validated_dataframe, 'summary_invalid_items': invalid_items}
 
@@ -742,7 +757,7 @@ class IndividualImportService:
 
         return validated_dataframe
 
-    def _validate_possible_individuals(self, dataframe: DataFrame, upload_id: uuid):
+    def _validate_possible_individuals(self, dataframe: DataFrame, upload_id: uuid, refuse_mask_placeholder=False):
         schema_dict = json.loads(IndividualConfig.individual_schema)
         properties = schema_dict.get("properties", {})
 
@@ -774,6 +789,14 @@ class IndividualImportService:
             user_allowed_loc_ids,
             duplicate_village_name_code_tuples,
         )
+        if refuse_mask_placeholder:
+            for field_validation in validated_dataframe:
+                for field in masked_row_fields_holding_the_mask(field_validation['row']):
+                    field_validation['validations'][f'{field}_mask_placeholder'] = {
+                        'success': False,
+                        'field_name': field,
+                        'note': f"'{field}' holds the mask placeholder, which is not a value",
+                    }
 
         self.save_validation_error_in_data_source_bulk(validated_dataframe)
         invalid_items = fetch_summary_of_broken_items(upload_id)
