@@ -200,8 +200,7 @@ class IndividualConfig(AppConfig):
         # Workflow needs to be re-registered, otherwise default/invalid ones would apply
         self._set_up_workflows()
 
-        # TODO: handle reloading of masking configs
-        logger.info(f"Reloaded app configs (except masking configs) for {self.name} module")
+        logger.info(f"Reloaded app configs for {self.name} module")
 
     @classmethod
     def __load_config(cls, cfg):
@@ -243,9 +242,14 @@ class IndividualConfig(AppConfig):
         )
 
     def __register_masking_class(cls):
-        from individual.data_masking import IndividualMask, IndividualHistoryMask
+        from individual.data_masking import (
+            GroupHistoryMask, GroupIndividualHistoryMask, GroupIndividualMask, GroupMask, GroupUploadRowMask,
+            IndividualHistoryMask, IndividualMask, IndividualUploadRowMask,
+        )
         MaskingClassRegistryPoint.register_masking_class(
-            masking_class_list=[IndividualMask(), IndividualHistoryMask()]
+            masking_class_list=[IndividualMask(), IndividualHistoryMask(), GroupMask(), GroupHistoryMask(),
+                                GroupIndividualMask(), GroupIndividualHistoryMask(),
+                                IndividualUploadRowMask(), GroupUploadRowMask()]
         )
 
     def _set_up_workflows(self):
