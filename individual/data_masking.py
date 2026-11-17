@@ -1,11 +1,15 @@
+import copy
 import datetime
 
-from django.core.exceptions import FieldDoesNotExist, PermissionDenied
+from django.core.exceptions import FieldDoesNotExist, PermissionDenied, ValidationError
 from graphene.types.resolver import dict_or_attr_resolver
 
 from core.apps import CoreConfig
 from core.data_masking import DataMaskAbs, MaskingClassStorage
 from individual.apps import IndividualConfig
+
+MASK_PLACEHOLDER = DataMaskAbs().anonymize("")
+_ABSENT = object()
 
 # Group json_ext keys holding member names, written from the persons' names by
 # GroupService.update_json_ext_for_group.
@@ -99,6 +103,37 @@ class GroupHistoryMask(GroupMask):
     masking_model = 'HistoricalGroup'
 
 
+class GroupIndividualMask(RegisteredFieldsMask):
+    """The membership fields other modules register. A masked choice column (role, recipient_type) becomes null,
+    the one value its GraphQL enum carries besides the choices."""
+
+    masking_model = 'GroupIndividual'
+    _sources = {}
+
+    def apply_mask(self, data):
+        for field in self.anon_fields:
+            parts = field.split(".")
+            if len(parts) == 1 and _is_choice_column(data, parts[0]):
+                setattr(data, parts[0], None)
+            else:
+                self._anonymize_nested_field(data, parts)
+        return data
+
+
+class GroupIndividualHistoryMask(GroupIndividualMask):
+    masking_model = 'HistoricalGroupIndividual'
+
+
+def _is_choice_column(obj, name):
+    meta = getattr(type(obj), "_meta", None)
+    if meta is None:
+        return False
+    try:
+        return bool(meta.get_field(name).choices)
+    except FieldDoesNotExist:
+        return False
+
+
 class UploadRowMask(DataMaskAbs):
     """An upload row (a data source's json_ext, holding its unit's columns and json_ext keys at its top level)
     masked by the mask of its unit, with the note of a validation error on a masked key."""
@@ -163,15 +198,15 @@ def context_may_see_masked(info):
 
 def mask_once(info, obj, masking_model):
     """Masks ``obj`` in place by the mask registered for ``masking_model``, once per object, unless the user
-    of the request may see masked data."""
+    of the request may see masked data. The object counts as checked only once the mask is applied, so a mask
+    that fails raises on every field of the object."""
     if getattr(obj, "_data_mask_checked", False):
         return obj
+    if not context_may_see_masked(info):
+        mask = MaskingClassStorage.get_masking_class(masking_model)
+        if mask is not None and mask.masking_enabled:
+            mask.apply_mask(obj)
     obj._data_mask_checked = True
-    if context_may_see_masked(info):
-        return obj
-    mask = MaskingClassStorage.get_masking_class(masking_model)
-    if mask is not None and mask.masking_enabled:
-        mask.apply_mask(obj)
     return obj
 
 
@@ -218,3 +253,58 @@ def check_export_columns(user, model, lookups):
     for lookup in lookups:
         if reads_masked_field(model, lookup):
             raise PermissionDenied(f"the column {lookup} needs the right to view masked data")
+
+
+def _value_at(value, path):
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return _ABSENT
+        value = value[key]
+    return value
+
+
+def _set_at(value, path, item):
+    for key in path[:-1]:
+        value = value.setdefault(key, {})
+    value[path[-1]] = item
+
+
+def _equal(left, right):
+    """``left == right``, False for values whose types cannot be compared (core's dates raise on a string)."""
+    try:
+        return bool(left == right)
+    except TypeError:
+        return False
+
+
+def check_masked_values_sent_back(user, masking_model, instance, obj_data):
+    """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field the
+    value the mask shows for it, naming the field. A date column given the mask, and a masked json_ext key that
+    the update's json_ext leaves out, keep their stored value (``obj_data`` is adjusted in place)."""
+    if instance is None or may_see_masked(user):
+        return
+    mask = MaskingClassStorage.get_masking_class(masking_model)
+    if mask is None or not mask.masking_enabled:
+        return
+    refused = []
+    for field in mask.anon_fields:
+        name, *path = field.split(".")
+        if name not in obj_data:
+            continue
+        stored = _value_at(getattr(instance, name, None), path)
+        if stored is _ABSENT:
+            continue
+        incoming = _value_at(obj_data[name], path)
+        if incoming is _ABSENT:
+            if path and isinstance(obj_data[name], dict):
+                _set_at(obj_data[name], path, copy.deepcopy(stored))
+            continue
+        if not _equal(incoming, mask.anonymize(copy.deepcopy(stored))) or _equal(incoming, stored):
+            continue
+        if not path and isinstance(stored, (datetime.date, datetime.datetime)):
+            del obj_data[name]
+            continue
+        refused.append(field)
+    if refused:
+        raise ValidationError(
+            f"masked value sent back for {', '.join(refused)}: send a new value or leave the field out")

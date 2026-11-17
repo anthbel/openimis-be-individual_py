@@ -223,11 +223,14 @@ class GroupHistoryGQLType(DjangoObjectType):
 
 
 class GroupIndividualGQLType(DjangoObjectType):
+    """A membership, masked by the membership mask on every path reaching it."""
+
     uuid = graphene.String(source='uuid')
 
     class Meta:
         model = GroupIndividual
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("GroupIndividual")
         filter_fields = {
             "id": ["exact"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],
@@ -256,6 +259,7 @@ class GroupIndividualHistoryGQLType(DjangoObjectType):
     class Meta:
         model = GroupIndividual.history.model
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("HistoricalGroupIndividual")
         filter_fields = {
             "id": ["exact"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],

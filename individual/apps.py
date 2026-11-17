@@ -243,11 +243,12 @@ class IndividualConfig(AppConfig):
 
     def __register_masking_class(cls):
         from individual.data_masking import (
-            GroupHistoryMask, GroupMask, GroupUploadRowMask, IndividualHistoryMask, IndividualMask,
-            IndividualUploadRowMask,
+            GroupHistoryMask, GroupIndividualHistoryMask, GroupIndividualMask, GroupMask, GroupUploadRowMask,
+            IndividualHistoryMask, IndividualMask, IndividualUploadRowMask,
         )
         MaskingClassRegistryPoint.register_masking_class(
             masking_class_list=[IndividualMask(), IndividualHistoryMask(), GroupMask(), GroupHistoryMask(),
+                                GroupIndividualMask(), GroupIndividualHistoryMask(),
                                 IndividualUploadRowMask(), GroupUploadRowMask()]
         )
 
