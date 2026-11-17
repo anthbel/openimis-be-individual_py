@@ -26,7 +26,7 @@ from individual.gql_queries import IndividualGQLType, IndividualHistoryGQLType, 
     IndividualSummaryEnrollmentGQLType, IndividualDataUploadQGLType, \
     GroupIndividualHistoryGQLType, GlobalSchemaType, \
     GroupSummaryEnrollmentGQLType, GroupDataSourceGQLType, MaskedOrderedFilterConnectionField
-from individual.gql_queries import UnmaskedOrderConnectionField
+from individual.gql_queries import MaskedOrderedConnectionField
 from individual.models import Individual, IndividualDataSource, Group, \
     GroupIndividual, IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from location.apps import LocationConfig
@@ -146,7 +146,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         client_mutation_id=graphene.String()
     )
 
-    individual_data_source_upload = UnmaskedOrderConnectionField(
+    individual_data_source_upload = MaskedOrderedConnectionField(
         IndividualDataSourceUploadGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -197,7 +197,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         benefitPlanId=graphene.String()
     )
 
-    individual_data_upload_history = UnmaskedOrderConnectionField(
+    individual_data_upload_history = MaskedOrderedConnectionField(
         IndividualDataUploadQGLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),

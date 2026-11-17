@@ -177,13 +177,15 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
          "individual_individualdatauploadrecords"),
     )
 
-    def test_an_upload_ordering_on_a_masked_or_json_field_is_left_out_without_the_masked_data_right(self):
+    def test_an_upload_ordering_on_a_masked_or_undescribed_json_field_is_left_out_without_the_masked_data_right(
+            self):
         IndividualDataUploadRecords(data_upload=self.upload, workflow="Python Import Individuals").save(
             user=self.unmasked)
         for query, table in self.UPLOAD_ORDERINGS:
             prefix = "" if "Upload(" in query else "dataUpload__"
             for term, read in ((f"{prefix}individualdatasource__jsonExt__phone", "Json_ext"),
-                               (f"-{prefix}individualdatasource__jsonExt__sex", "Json_ext"),
+                               (f"{prefix}individualdatasource__jsonExt__first_name", "Json_ext"),
+                               (f"-{prefix}individualdatasource__validations__validation_errors", "validations"),
                                (f"{prefix}individualdatasource__individual__firstName", "first_name")):
                 with self.subTest(query=query, term=term):
                     orders = self.order_sql(self.viewer, query % term, table)
@@ -197,7 +199,21 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         query, table = self.UPLOAD_ORDERINGS[0]
         self.assertTrue(any(order.startswith(f' "{table}"."source_name" ASC, "{table}"."UUID" ASC')
                             for order in self.order_sql(self.viewer, query % "sourceName", table)))
+        self.assertTrue(any("'sex'" in order and f'"{table}"."UUID" ASC' in order for order in self.order_sql(
+            self.viewer, query % "-individualdatasource__jsonExt__sex", table)))
 
+    def test_a_data_source_ordering_crossing_a_json_field_no_mask_describes_is_left_out(self):
+        table = "individual_individualdatasource"
+        for term in ("validations__validation_errors__0__note", "-validations"):
+            query = ('{ individualDataSource(upload_Id: "%%(upload)s", orderBy: ["%s"]) { edges { node { id } } } }'
+                     % term)
+            with self.subTest(term=term):
+                orders = self.order_sql(self.viewer, query, table)
+                self.assertTrue(orders)
+                for order in orders:
+                    self.assertNotIn('"validations"', order)
+                    self.assertIn(f'"{table}"."UUID" ASC', order)
+                self.assertTrue(any('"validations"' in order for order in self.order_sql(self.unmasked, query, table)))
 
 ENROLL = """
 mutation ($input: %sInput!) { %s(input: $input) { internalId } }

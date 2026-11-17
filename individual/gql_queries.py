@@ -12,12 +12,10 @@ from core.schema import OrderedDjangoFilterConnectionField
 from individual.apps import IndividualConfig
 from individual.data_masking import (
     check_filter_lookups, custom_filter_lookups, filter_lookups, mask_once, masked_order_by, masking_resolver,
-    unmasked_order_by,
 )
 from individual.models import Individual, IndividualDataSource, Group, GroupIndividual, \
     IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from core.gql import ScopedQuerysetMixin
-from tasks_management.data_masking import unmasked_json_order_by
 
 
 def _have_permissions(user, permission):
@@ -33,20 +31,6 @@ class JsonExtMixin:
         if _have_permissions(info.context.user, IndividualConfig.gql_individual_search_perms):
             return self.json_ext
         return None
-
-
-class UnmaskedOrderConnectionField(OrderedDjangoFilterConnectionField):
-    """Core's ordered connection leaving out, for a user without the masked-data right, the ``orderBy`` terms
-    whose path traverses a JSON field (``unmasked_json_order_by``: JSON fields hold copies of masked values) or
-    reads a masked field (``unmasked_order_by``), through any relation; the primary key orders last."""
-
-    @classmethod
-    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
-        if args.get("orderBy"):
-            user, model = info.context.user, filterset_class._meta.model
-            args = {**args, "orderBy": unmasked_order_by(
-                user, model, unmasked_json_order_by(user, model, args["orderBy"]))}
-        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
 
 
 class MaskedFilterSet(django_filters.FilterSet):
@@ -86,8 +70,8 @@ class MaskedFilterObjectType(DjangoObjectType):
 
 class MaskedFilterMixin:
     """A connection refusing to a user without the masked-data right its filter arguments and ``customFilters``
-    when they read a masked field (``check_filter_lookups``), and leaving out the ``orderBy`` terms ordering by
-    one (``unmasked_order_by``)."""
+    when they read a masked field (``check_filter_lookups``), and leaving out the ``orderBy`` terms that would
+    tell masked values (``masked_order_by``)."""
 
     @classmethod
     def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
@@ -97,7 +81,7 @@ class MaskedFilterMixin:
         lookups += custom_filter_lookups(args.get("customFilters"))
         check_filter_lookups(user, model, lookups)
         if args.get("orderBy"):
-            args = {**args, "orderBy": unmasked_order_by(user, model, args["orderBy"])}
+            args = {**args, "orderBy": masked_order_by(user, model, args["orderBy"])}
         return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
 
 
