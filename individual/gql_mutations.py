@@ -8,6 +8,7 @@ from core.gql.gql_mutations.base_mutation import BaseHistoryModelDeleteMutationM
     BaseHistoryModelUpdateMutationMixin, BaseHistoryModelCreateMutationMixin
 from core.schema import OpenIMISMutation
 from individual.apps import IndividualConfig
+from individual.data_masking import MASK_PLACEHOLDER
 from individual.models import Individual, Group, GroupIndividual
 from individual.services import IndividualService, GroupService, GroupIndividualService, \
     CreateGroupAndMoveIndividualService
@@ -22,8 +23,24 @@ class CreateIndividualInputType(OpenIMISMutation.Input):
     location_id = graphene.Int(required=False)
 
 
+class DateOrMask(graphene.Date):
+    """A date as YYYY-MM-DD, or the mask a user without the masked-data right reads in place of a masked date."""
+
+    @staticmethod
+    def parse_value(value):
+        if value == MASK_PLACEHOLDER:
+            return value
+        return graphene.Date.parse_value(value)
+
+
 class UpdateIndividualInputType(CreateIndividualInputType):
+    """A field left out keeps its value; for a user without the masked-data right, ``dob`` given as the mask keeps
+    the stored date, and another masked field given the mask is refused."""
+
     id = graphene.UUID(required=True)
+    first_name = graphene.String(required=False, max_length=255)
+    last_name = graphene.String(required=False, max_length=255)
+    dob = DateOrMask(required=False)
 
 
 RoleEnum = graphene.Enum.from_enum(GroupIndividual.Role)

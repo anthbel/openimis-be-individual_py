@@ -6,6 +6,7 @@ import graphene_django_optimizer as gql_optimizer
 from core import prefix_filterset, ExtendedConnection
 from core.gql_queries import UserGQLType
 from individual.apps import IndividualConfig
+from individual.data_masking import mask_once, masking_resolver
 from individual.models import Individual, IndividualDataSource, Group, GroupIndividual, \
     IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from core.gql import ScopedQuerysetMixin
@@ -26,12 +27,25 @@ class JsonExtMixin:
         return None
 
 
+def _masked_dob(root, info, masking_model):
+    dob = mask_once(info, root, masking_model).dob
+    return dob.isoformat() if hasattr(dob, "isoformat") else dob
+
+
 class IndividualGQLType(DjangoObjectType):
+    """A person, masked by the person mask on every path reaching it for a user without the masked-data
+    right; ``dob`` is a string so that it can carry the mask."""
+
     uuid = graphene.String(source='uuid')
+    dob = graphene.String(required=True, description="YYYY-MM-DD, or the mask when masked")
+
+    def resolve_dob(self, info):
+        return _masked_dob(self, info, "Individual")
 
     class Meta:
         model = Individual
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("Individual")
         filter_fields = {
             "id": ["exact", "isnull"],
             "first_name": ["iexact", "istartswith", "icontains"],
@@ -51,15 +65,22 @@ class IndividualGQLType(DjangoObjectType):
 
 
 class IndividualHistoryGQLType(DjangoObjectType):
+    """A person record, masked as ``IndividualGQLType`` is."""
+
     uuid = graphene.String(source='uuid')
     user_updated = graphene.Field(UserGQLType)
+    dob = graphene.String(required=True, description="YYYY-MM-DD, or the mask when masked")
 
     def resolve_user_updated(self, info):
         return self.user_updated
 
+    def resolve_dob(self, info):
+        return _masked_dob(self, info, "HistoricalIndividual")
+
     class Meta:
         model = Individual.history.model
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("HistoricalIndividual")
         filter_fields = {
             "id": ["exact"],
             "first_name": ["iexact", "istartswith", "icontains"],
@@ -113,11 +134,14 @@ class IndividualDataSourceUploadGQLType(ScopedQuerysetMixin, DjangoObjectType):
 
 
 class IndividualDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
+    """An upload row, masked with its validation errors by the person mask on every path reaching it."""
+
     uuid = graphene.String(source='uuid')
 
     class Meta:
         model = IndividualDataSource
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("IndividualDataSource")
         filter_fields = {
             "id": ["exact", "isnull"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],
@@ -144,6 +168,7 @@ class GroupGQLType(DjangoObjectType):
     class Meta:
         model = Group
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("Group")
         filter_fields = {
             "id": ["exact", "isnull"],
             "code": ["iexact", "istartswith", "icontains"],
@@ -178,6 +203,7 @@ class GroupHistoryGQLType(DjangoObjectType):
     class Meta:
         model = Group.history.model
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("HistoricalGroup")
         filter_fields = {
             "id": ["exact"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],
@@ -197,11 +223,14 @@ class GroupHistoryGQLType(DjangoObjectType):
 
 
 class GroupIndividualGQLType(DjangoObjectType):
+    """A membership, masked by the membership mask on every path reaching it."""
+
     uuid = graphene.String(source='uuid')
 
     class Meta:
         model = GroupIndividual
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("GroupIndividual")
         filter_fields = {
             "id": ["exact"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],
@@ -230,6 +259,7 @@ class GroupIndividualHistoryGQLType(DjangoObjectType):
     class Meta:
         model = GroupIndividual.history.model
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("HistoricalGroupIndividual")
         filter_fields = {
             "id": ["exact"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],
@@ -270,11 +300,14 @@ class IndividualDataUploadQGLType(ScopedQuerysetMixin, DjangoObjectType, JsonExt
 
 
 class GroupDataSourceGQLType(ScopedQuerysetMixin, DjangoObjectType):
+    """A group upload row, masked with its validation errors by the group mask on every path reaching it."""
+
     uuid = graphene.String(source='uuid')
 
     class Meta:
         model = GroupDataSource
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver("GroupDataSource")
         filter_fields = {
             "id": ["exact", "isnull"],
             "date_created": ["exact", "lt", "lte", "gt", "gte"],

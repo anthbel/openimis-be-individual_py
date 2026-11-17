@@ -4,6 +4,7 @@ import uuid
 import pandas as pd
 from pandas import DataFrame
 from django.core.files.uploadedfile import InMemoryUploadedFile
+from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from calculation.services import get_calculation_object
@@ -16,6 +17,7 @@ from django.apps import apps
 # from django.utils.translation import gettext as _
 from django.db.models import Q, OuterRef, Subquery, Count
 from individual.apps import IndividualConfig
+from individual.data_masking import check_masked_values_sent_back
 from individual.models import (
     Individual,
     IndividualDataSource,
@@ -45,17 +47,34 @@ from workflow.systems.base import WorkflowHandler
 logger = logging.getLogger(__name__)
 
 
+def refuse_masked_values_sent_back(service, masking_model, obj_data):
+    """The failed result of an update that sends a masked value back (``check_masked_values_sent_back``), or
+    None; ``obj_data`` is adjusted in place."""
+    instance = service.OBJECT_TYPE.objects.filter(id=obj_data.get("id")).first() if obj_data else None
+    try:
+        check_masked_values_sent_back(service.user, masking_model, instance, obj_data)
+    except ValidationError as exc:
+        return output_exception(model_name=service.OBJECT_TYPE.__name__, method="update", exception=exc)
+    return None
+
+
 class IndividualService(BaseService, UpdateCheckerLogicServiceMixin, DeleteCheckerLogicServiceMixin):
     @register_service_signal('individual_service.create')
     def create(self, obj_data):
         return super().create(obj_data)
 
     def create_update_task(self, obj_data):
+        refused = refuse_masked_values_sent_back(self, "Individual", obj_data)
+        if refused:
+            return refused
         self._update_json_ext(obj_data)
         return super().create_update_task(obj_data)
 
     @register_service_signal('individual_service.update')
     def update(self, obj_data):
+        refused = refuse_masked_values_sent_back(self, "Individual", obj_data)
+        if refused:
+            return refused
         self._update_json_ext(obj_data)
         return super().update(obj_data)
 
@@ -200,9 +219,16 @@ class GroupService(
         except Exception as exc:
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="create", exception=exc)
 
+    def create_update_task(self, obj_data):
+        refused = refuse_masked_values_sent_back(self, "Group", obj_data)
+        return refused or super().create_update_task(obj_data)
+
     @check_authentication
     @register_service_signal('group_service.update')
     def update(self, obj_data):
+        refused = refuse_masked_values_sent_back(self, "Group", obj_data)
+        if refused:
+            return refused
         try:
             with transaction.atomic():
                 individuals_data = obj_data.pop('individuals_data', None)

@@ -1,0 +1,652 @@
+import copy
+import datetime
+import json
+from unittest import mock
+
+from django.http import HttpResponse
+from django.test import TestCase
+from django.urls import reverse
+from rest_framework.test import APIClient
+
+from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
+from core.test_helpers import create_right_only_user
+from individual.apps import IndividualConfig
+from individual.data_masking import (
+    GroupHistoryMask, GroupIndividualMask, GroupMask, IndividualHistoryMask, IndividualMask,
+)
+from individual.models import (
+    Group, GroupDataSource, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload,
+)
+from individual.views import download_individual_upload, download_invalid_items
+from location.test_helpers import create_test_village
+
+MASKED = "***************"
+SEARCH_PERMS = ["gql_individual_search_perms", "gql_group_search_perms"]
+
+
+def person_fields():
+    return ["first_name", "dob", "json_ext.phone", "json_ext.gps"]
+
+
+def group_fields():
+    return ["code", "json_ext.income"]
+
+
+def membership_fields():
+    return ["role", "recipient_type"]
+
+
+class RegisteredFieldsTestMixin:
+    def register(self, person=person_fields, group=group_fields, membership=membership_fields):
+        masks = ((IndividualMask, person), (GroupMask, group), (GroupIndividualMask, membership))
+        for mask, source in masks:
+            patcher = mock.patch.dict(mask._sources, clear=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            mask.register_fields("test", source)
+            self.addCleanup(mask.register_fields, "test", None)
+
+
+class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
+    def test_the_person_masks_add_the_registered_fields_to_their_own(self):
+        self.register()
+        for mask in (IndividualMask(), IndividualHistoryMask()):
+            self.assertEqual(mask.anon_fields, [*IndividualConfig.individual_mask_fields, *person_fields()])
+            self.assertTrue(mask.masking_enabled)
+
+    def test_the_registered_fields_are_read_when_the_mask_is_applied(self):
+        fields = ["first_name"]
+        self.register(person=lambda: list(fields))
+        fields.append("last_name")
+        self.assertIn("last_name", IndividualMask().anon_fields)
+
+    def test_none_removes_a_registration(self):
+        self.register()
+        IndividualMask.register_fields("test", None)
+        GroupMask.register_fields("test", None)
+        self.assertEqual(IndividualMask().anon_fields, list(IndividualConfig.individual_mask_fields))
+        self.assertNotIn("code", GroupMask().anon_fields)
+
+    def test_the_group_masks_take_the_registered_fields_and_the_copy_of_the_masked_head_fields(self):
+        self.register()
+        with mock.patch.object(IndividualConfig, "group_json_ext_keys_not_copied_from_head", ["gps"]):
+            for mask in (GroupMask(), GroupHistoryMask()):
+                fields = mask.anon_fields
+                self.assertLessEqual({"code", "json_ext.income", "json_ext.phone", "json_ext.head",
+                                      "json_ext.members", "json_ext.primary_recipient",
+                                      "json_ext.secondary_recipient"}, set(fields))
+                self.assertNotIn("json_ext.gps", fields)
+                self.assertNotIn("first_name", fields)
+
+    def test_the_own_fields_follow_the_configuration_in_use(self):
+        with mock.patch.object(IndividualConfig, "individual_mask_fields", ["last_name"]), \
+                mock.patch.object(IndividualConfig, "individual_masking_enabled", True):
+            self.assertEqual(IndividualMask().anon_fields, ["last_name"])
+            self.assertEqual(IndividualHistoryMask().anon_fields, ["last_name"])
+            with mock.patch.object(IndividualConfig, "individual_masking_enabled", False):
+                self.assertEqual(IndividualMask().anon_fields, [])
+                self.assertFalse(IndividualMask().masking_enabled)
+
+    def test_the_registered_fields_are_masked_when_individual_masking_is_disabled(self):
+        self.register()
+        with mock.patch.object(IndividualConfig, "individual_masking_enabled", False):
+            self.assertEqual(IndividualMask().anon_fields, person_fields())
+            self.assertTrue(IndividualMask().masking_enabled)
+            IndividualMask.register_fields("test", None)
+            self.assertFalse(IndividualMask().masking_enabled)
+
+    def test_dates_and_lists_are_masked(self):
+        mask = IndividualMask()
+        self.assertEqual(mask.anonymize(datetime.date(1980, 1, 1)), MASKED)
+        self.assertEqual(mask.anonymize(["a", 1]), [MASKED, 0])
+        self.assertEqual(mask.anonymize({"lat": 1.5, "tags": ["x"]}), {"lat": 0, "tags": [MASKED]})
+
+
+PERSON_QUERY = """
+query {
+  individual(id: "%(individual)s") { edges { node { firstName lastName dob jsonExt } } }
+  individualHistory(id: "%(individual)s") { edges { node { firstName dob jsonExt } } }
+}
+"""
+
+GROUP_QUERY = """
+query {
+  group(id: "%(group)s") { edges { node { code jsonExt head { firstName dob jsonExt } } } }
+  groupHistory(id: "%(group)s") { edges { node { code jsonExt head { firstName } } } }
+  groupIndividual(group_Id: "%(group)s") {
+    edges { node { individual { firstName dob jsonExt } group { code jsonExt } } }
+  }
+}
+"""
+
+
+class MaskedQueriesTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """individual's person and group queries, and the persons and groups they reach, are masked by the person
+    and group masks for a user without the masked-data right."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Mask village", "code": "MkV"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        self.group = Group(code="MK-G1", location=village, json_ext={"income": 120, "roof": "tin"})
+        self.group.save(user=admin)
+        self.person = Individual(
+            first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2), location=village,
+            json_ext={"phone": "+257 1", "gps": {"lat": 1.5, "lon": 2.5}, "educated_level": "primary",
+                      "sex": "F"},
+        )
+        self.person.save(user=admin)
+        GroupIndividual(group=self.group, individual=self.person, role=GroupIndividual.Role.HEAD).save(user=admin)
+        self.group.refresh_from_db()
+        self.assertEqual(self.group.json_ext["phone"], "+257 1")
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
+        self.register()
+
+    def gql(self, user, query):
+        response = self.query(query % {"individual": self.person.id, "group": self.group.id},
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        return content["data"]
+
+    @staticmethod
+    def nodes(data, name):
+        return [edge["node"] for edge in data[name]["edges"]]
+
+    def assert_person_masked(self, person):
+        json_ext = json.loads(person["jsonExt"]) if "jsonExt" in person else None
+        self.assertEqual(person["firstName"], MASKED)
+        if "dob" in person:
+            self.assertEqual(person["dob"], MASKED)
+        if json_ext is not None:
+            self.assertEqual(json_ext["phone"], MASKED)
+            self.assertEqual(json_ext["gps"], {"lat": 0, "lon": 0})
+            self.assertEqual(json_ext["educated_level"], MASKED)
+            self.assertEqual(json_ext["sex"], "F")
+
+    def assert_group_masked(self, group):
+        json_ext = json.loads(group["jsonExt"])
+        self.assertEqual(group["code"], MASKED)
+        self.assertEqual((json_ext["income"], json_ext["roof"]), (0, "tin"))
+        self.assertEqual((json_ext["phone"], json_ext["head"]), (MASKED, MASKED))
+        self.assertEqual(set(json_ext["members"].values()), {MASKED})
+
+    def test_the_person_queries_mask_the_registered_fields(self):
+        data = self.gql(self.viewer, PERSON_QUERY)
+        [person] = self.nodes(data, "individual")
+        self.assert_person_masked(person)
+        self.assertEqual(person["lastName"], "Lovelace")
+        history = self.nodes(data, "individualHistory")
+        self.assertTrue(history)
+        for record in history:
+            self.assert_person_masked(record)
+
+    def test_the_group_queries_mask_the_group_and_the_persons_they_reach(self):
+        data = self.gql(self.viewer, GROUP_QUERY)
+        [group] = self.nodes(data, "group")
+        self.assert_group_masked(group)
+        self.assert_person_masked(group["head"])
+        history = self.nodes(data, "groupHistory")
+        self.assertTrue(history)
+        for record in history:
+            self.assertEqual(record["code"], MASKED)
+            self.assertEqual(json.loads(record["jsonExt"])["income"], 0)
+            self.assertEqual(record["head"]["firstName"], MASKED)
+        [membership] = self.nodes(data, "groupIndividual")
+        self.assert_person_masked(membership["individual"])
+        self.assert_group_masked(membership["group"])
+
+    def test_a_user_with_the_masked_data_right_reads_the_values(self):
+        data = self.gql(self.unmasked, PERSON_QUERY)
+        [person] = self.nodes(data, "individual")
+        self.assertEqual((person["firstName"], person["dob"]), ("Ada", "1980-01-02"))
+        self.assertEqual(json.loads(person["jsonExt"])["phone"], "+257 1")
+        data = self.gql(self.unmasked, GROUP_QUERY)
+        [group] = self.nodes(data, "group")
+        self.assertEqual((group["code"], json.loads(group["jsonExt"])["income"]), ("MK-G1", 120))
+        self.assertEqual(json.loads(group["jsonExt"])["head"], "Ada Lovelace")
+        self.assertEqual(group["head"]["firstName"], "Ada")
+        [membership] = self.nodes(data, "groupIndividual")
+        self.assertEqual(membership["individual"]["firstName"], "Ada")
+
+    def test_without_registered_fields_the_own_fields_are_masked(self):
+        IndividualMask.register_fields("test", None)
+        GroupMask.register_fields("test", None)
+        [person] = self.nodes(self.gql(self.viewer, PERSON_QUERY), "individual")
+        self.assertEqual((person["firstName"], person["dob"]), ("Ada", "1980-01-02"))
+        self.assertEqual(json.loads(person["jsonExt"])["educated_level"], MASKED)
+        [group] = self.nodes(self.gql(self.viewer, GROUP_QUERY), "group")
+        self.assertEqual(group["code"], "MK-G1")
+        self.assertEqual(json.loads(group["jsonExt"])["educated_level"], MASKED)
+
+
+EXPORT = '{ %s(%s fields: [%s], fieldsColumns: "{}") }'
+
+
+class MaskedExportTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """An export column reading a field the person or group mask masks needs the masked-data right."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Export village", "code": "MkE"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_exp_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_exp_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_exp_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        self.group = Group(code="MK-E1", location=village, json_ext={"income": 120, "roof": "tin"})
+        self.group.save(user=admin)
+        person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
+                            location=village, json_ext={"phone": "+257 1"})
+        person.save(user=admin)
+        GroupIndividual(group=self.group, individual=person, role=GroupIndividual.Role.HEAD).save(user=admin)
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
+        self.register()
+
+    def export(self, user, query, fields, args=""):
+        response = self.query(EXPORT % (query, args, ", ".join(f'"{field}"' for field in fields)),
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        return json.loads(response.content)
+
+    def test_a_masked_column_is_refused_without_the_masked_data_right(self):
+        group_arg = f'group_Id: "{self.group.id}",'
+        for query, column, args in (("individualExport", "firstName", ""), ("individualExport", "dob", ""),
+                                    ("individualExport", "jsonExt", ""), ("individualExport", "jsonExt.phone", ""),
+                                    ("groupExport", "code", ""), ("groupExport", "jsonExt", ""),
+                                    ("groupExport", "jsonExt.head", ""),
+                                    ("groupIndividualExport", "individual.firstName", group_arg),
+                                    ("groupIndividualExport", "group.jsonExt", group_arg)):
+            with self.subTest(query=query, column=column):
+                self.assertIn("errors", self.export(self.viewer, query, ["id", column], args))
+                self.assertNotIn("errors", self.export(self.unmasked, query, ["id", column], args))
+
+    def test_an_unmasked_column_is_exported(self):
+        for query, column in (("individualExport", "lastName"), ("individualExport", "jsonExt.sex"),
+                              ("groupExport", "jsonExt.roof")):
+            with self.subTest(query=query, column=column):
+                self.assertNotIn("errors", self.export(self.viewer, query, ["id", column]))
+
+
+DATA_SOURCE_QUERY = """
+query {
+  individualDataSource(upload_Id: "%(upload)s") { edges { node { jsonExt validations individual { firstName } } } }
+  groupDataSource(upload_Id: "%(upload)s") { edges { node { jsonExt validations group { code } } } }
+}
+"""
+
+
+class UploadRowMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """An upload row and its validation errors are masked by the mask of the person or group the row holds."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Upload village", "code": "MkU"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_up_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_up_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_up_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        group = Group(code="MK-U1", location=village, json_ext={"income": 120, "roof": "tin"})
+        group.save(user=admin)
+        person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
+                            location=village, json_ext={"phone": "+257 1", "sex": "F"})
+        person.save(user=admin)
+        self.upload = IndividualDataSourceUpload(source_name="rows.csv", source_type="individual import")
+        self.upload.save(user=admin)
+        IndividualDataSource(
+            upload=self.upload, individual=person,
+            json_ext={"first_name": "Ada", "last_name": "Lovelace", "dob": "1980-01-02", "phone": "+257 1",
+                      "sex": "F"},
+            validations={"validation_errors": [
+                {"field_name": "phone", "note": "'phone' Field value '+257 1' is duplicated in this upload"},
+                {"field_name": "sex", "note": "'sex' is required"},
+            ]},
+        ).save(user=admin)
+        GroupDataSource(
+            upload=self.upload, group=group,
+            json_ext={"code": "MK-U1", "income": 120, "roof": "tin",
+                      "individuals_data": [{"individual_id": str(person.id), "role": "HEAD"}]},
+        ).save(user=admin)
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
+        self.register()
+
+    def gql(self, user):
+        response = self.query(DATA_SOURCE_QUERY % {"upload": self.upload.id},
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        [row] = [edge["node"] for edge in content["data"]["individualDataSource"]["edges"]]
+        [group_row] = [edge["node"] for edge in content["data"]["groupDataSource"]["edges"]]
+        return row, group_row
+
+    def download(self, user, view, **params):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(reverse(view), params)
+
+    def test_the_rows_and_their_errors_are_masked_without_the_masked_data_right(self):
+        row, group_row = self.gql(self.viewer)
+        data = json.loads(row["jsonExt"])
+        self.assertEqual((data["first_name"], data["dob"], data["phone"]), (MASKED, MASKED, MASKED))
+        self.assertEqual((data["last_name"], data["sex"]), ("Lovelace", "F"))
+        notes = {error["field_name"]: error["note"] for error in json.loads(row["validations"])["validation_errors"]}
+        self.assertEqual(notes, {"phone": MASKED, "sex": "'sex' is required"})
+        self.assertEqual(row["individual"]["firstName"], MASKED)
+        data = json.loads(group_row["jsonExt"])
+        self.assertEqual((data["code"], data["income"], data["roof"]), (MASKED, 0, "tin"))
+        self.assertEqual(data["individuals_data"][0]["role"], "HEAD")
+        self.assertEqual(group_row["group"]["code"], MASKED)
+
+    def test_the_rows_are_clear_with_the_masked_data_right(self):
+        row, group_row = self.gql(self.unmasked)
+        data = json.loads(row["jsonExt"])
+        self.assertEqual((data["first_name"], data["dob"], data["phone"]), ("Ada", "1980-01-02", "+257 1"))
+        self.assertIn("+257 1", json.loads(row["validations"])["validation_errors"][0]["note"])
+        self.assertEqual(json.loads(group_row["jsonExt"])["code"], "MK-U1")
+
+    def test_the_invalid_rows_download_is_masked_without_the_masked_data_right(self):
+        masked = b"".join(self.download(self.viewer, download_invalid_items, upload_id=self.upload.id)
+                          .streaming_content).decode()
+        self.assertNotIn("Ada", masked)
+        self.assertNotIn("+257 1", masked)
+        self.assertIn("Lovelace", masked)
+        clear = b"".join(self.download(self.unmasked, download_invalid_items, upload_id=self.upload.id)
+                         .streaming_content).decode()
+        self.assertIn("Ada", clear)
+        self.assertIn("+257 1", clear)
+
+    def test_the_uploaded_file_needs_the_masked_data_right(self):
+        response = self.download(self.viewer, download_individual_upload, filename="rows.csv")
+        self.assertEqual(response.status_code, 403)
+        with mock.patch("individual.views.DefaultStorageFileHandler") as handler:
+            handler.return_value.get_file_response_csv.return_value = HttpResponse(b"rows")
+            response = self.download(self.unmasked, download_individual_upload, filename="rows.csv")
+        self.assertEqual(response.status_code, 200)
+
+
+MEMBERSHIP_QUERY = """
+query {
+  groupIndividual(group_Id: "%(group)s") { edges { node { role recipientType individual { firstName } } } }
+  groupIndividualHistory(group_Id: "%(group)s") { edges { node { role recipientType } } }
+  group(id: "%(group)s") { edges { node { code } } }
+}
+"""
+
+
+class MembershipMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """The membership fields other modules register are masked on every membership path; a masked role or
+    recipient type is null."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Membership village", "code": "MkM"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_gi_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_gi_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_gi_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        self.group = Group(code="MK-M1", location=village)
+        self.group.save(user=admin)
+        person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2), location=village)
+        person.save(user=admin)
+        GroupIndividual(group=self.group, individual=person, role=GroupIndividual.Role.HEAD,
+                        recipient_type=GroupIndividual.RecipientType.PRIMARY).save(user=admin)
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
+        self.register(group=lambda: [])
+
+    def memberships(self, user):
+        response = self.query(MEMBERSHIP_QUERY % {"group": self.group.id},
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        data = content["data"]
+        history = [edge["node"] for edge in data["groupIndividualHistory"]["edges"]]
+        self.assertTrue(history)
+        return [edge["node"] for edge in data["groupIndividual"]["edges"]], history
+
+    def test_the_registered_membership_fields_are_masked_without_the_masked_data_right(self):
+        [membership], history = self.memberships(self.viewer)
+        self.assertEqual((membership["role"], membership["recipientType"]), (None, None))
+        self.assertEqual(membership["individual"]["firstName"], MASKED)
+        for record in history:
+            self.assertEqual((record["role"], record["recipientType"]), (None, None))
+
+    def test_the_membership_fields_are_clear_with_the_masked_data_right(self):
+        [membership], history = self.memberships(self.unmasked)
+        self.assertEqual((membership["role"], membership["recipientType"]), ("HEAD", "PRIMARY"))
+        self.assertEqual(history[0]["role"], "HEAD")
+
+
+class FailingSourceTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """A mask whose fields cannot be computed never lets the values through."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Failing village", "code": "MkF"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_fail_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_fail_viewer", SEARCH_PERMS, [district])
+        self.group = Group(code="MK-F1", location=village)
+        self.group.save(user=admin)
+        person = Individual(first_name="Adaline", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
+                            location=village, json_ext={"phone": "+257 9"})
+        person.save(user=admin)
+        GroupIndividual(group=self.group, individual=person, role=GroupIndividual.Role.HEAD).save(user=admin)
+        self.token = BaseTestContext(user=self.viewer).get_jwt()
+
+        def failing():
+            raise RuntimeError("source unavailable")
+
+        self.register(person=failing, group=lambda: [])
+
+    def test_a_failing_source_gives_errors_not_values(self):
+        for query in ('{ group(id: "%s") { edges { node { head { dateCreated firstName dob jsonExt } } } } }',
+                      '{ groupIndividual(group_Id: "%s") { edges { node { individual { dateCreated firstName dob '
+                      'jsonExt } } } } }'):
+            with self.subTest(query=query):
+                response = self.query(query % self.group.id, headers={"HTTP_AUTHORIZATION": f"Bearer {self.token}"})
+                text = response.content.decode()
+                self.assertIn("errors", json.loads(text))
+                self.assertNotIn("Adaline", text)
+                self.assertNotIn("+257 9", text)
+                self.assertNotIn("1980-01-02", text)
+
+
+UPDATE_PERMS = SEARCH_PERMS + ["gql_individual_update_perms", "gql_group_update_perms"]
+NESTED_KEYS = ("phones", "address", "score", "active")
+
+
+def json_arg(value):
+    """``value`` as a GraphQL string literal of its JSON."""
+    return json.dumps(json.dumps(value))
+
+
+class MaskedValueSentBackTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """An update by a user without the masked-data right never stores the mask it read."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Update village", "code": "MkW"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_upd_admin", SEARCH_PERMS, [district])
+        self.editor = create_right_only_user("mask_upd_editor", UPDATE_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_upd_unmasked", UPDATE_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        self.village = village
+        self.group = Group(code="MK-W1", location=village, json_ext={"income": 120})
+        self.group.save(user=admin)
+        self.person = Individual(
+            first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2), location=village,
+            json_ext={"phone": "+257 1", "sex": "F", "phones": ["+257 11", "+257 22"],
+                      "address": {"hill": "Rohero", "colline": "Kiriri"}, "score": 5, "active": True})
+        self.person.save(user=admin)
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.editor, self.unmasked)}
+        self.register(person=lambda: [*person_fields(), *(f"json_ext.{key}" for key in NESTED_KEYS)],
+                      group=lambda: ["code", "json_ext.gps"])
+        patcher = mock.patch.object(IndividualConfig, "check_individual_update", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def update_individual(self, user, fields):
+        return self.mutate(user, "updateIndividual", f'id: "{self.person.id}" locationId: {self.village.id} {fields}')
+
+    def mutate(self, user, name, fields):
+        response = self.query(f"mutation {{ {name}(input: {{ {fields} }}) {{ internalId }} }}",
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        return self._get_mutation_log_node(content["data"][name]["internalId"], self.tokens[user.username])
+
+    def person_now(self):
+        return Individual.objects.get(id=self.person.id)
+
+    def test_a_person_update_sending_masked_values_back_is_refused(self):
+        node = self.update_individual(self.editor, (
+            f'firstName: "{MASKED}" lastName: "Byron" '
+            f'jsonExt: "{{\\"phone\\": \\"{MASKED}\\", \\"sex\\": \\"F\\"}}"'))
+        self.assertNotEqual(node["status"], 2, node)
+        self.assertIn("first_name", node["error"])
+        self.assertIn("json_ext.phone", node["error"])
+        person = self.person_now()
+        self.assertEqual((person.first_name, person.last_name, person.json_ext["phone"]),
+                         ("Ada", "Lovelace", "+257 1"))
+
+    def test_fields_left_out_and_a_masked_dob_keep_their_values(self):
+        node = self.update_individual(
+            self.editor, f'lastName: "Byron" dob: "{MASKED}" jsonExt: "{{\\"sex\\": \\"M\\"}}"')
+        self.assertEqual(node["status"], 2, node["error"])
+        person = self.person_now()
+        self.assertEqual((person.first_name, person.last_name, person.dob), ("Ada", "Byron", datetime.date(1980, 1, 2)))
+        self.assertEqual((person.json_ext["phone"], person.json_ext["sex"]), ("+257 1", "M"))
+
+    def test_a_new_value_of_a_masked_field_is_saved(self):
+        node = self.update_individual(self.editor, 'firstName: "Augusta" dob: "1981-03-04"')
+        self.assertEqual(node["status"], 2, node["error"])
+        person = self.person_now()
+        self.assertEqual((person.first_name, person.dob), ("Augusta", datetime.date(1981, 3, 4)))
+
+    def test_the_update_task_refuses_masked_values_sent_back(self):
+        from tasks_management.models import Task
+
+        tasks = Task.objects.count()
+        with mock.patch.object(IndividualConfig, "check_individual_update", True):
+            node = self.update_individual(self.editor, f'firstName: "{MASKED}"')
+        self.assertNotEqual(node["status"], 2, node)
+        self.assertIn("first_name", node["error"])
+        self.assertEqual(Task.objects.count(), tasks)
+
+    def test_a_group_update_sending_the_masked_code_back_is_refused(self):
+        node = self.mutate(self.editor, "updateGroup", f'id: "{self.group.id}" code: "{MASKED}"')
+        self.assertNotEqual(node["status"], 2, node)
+        self.assertIn("code", node["error"])
+        self.assertEqual(Group.objects.get(id=self.group.id).code, "MK-W1")
+
+    def test_a_list_or_object_holding_the_mask_is_refused(self):
+        node = self.update_individual(self.editor, "jsonExt: " + json_arg({
+            "sex": "F", "phones": [MASKED, MASKED, "+257 33"], "address": {"hill": MASKED, "colline": "Nyakabiga"}}))
+        self.assertNotEqual(node["status"], 2, node)
+        self.assertIn("json_ext.phones", node["error"])
+        self.assertIn("json_ext.address", node["error"])
+        json_ext = self.person_now().json_ext
+        self.assertEqual(json_ext["phones"], ["+257 11", "+257 22"])
+        self.assertEqual(json_ext["address"], {"hill": "Rohero", "colline": "Kiriri"})
+
+    def test_a_masked_number_or_boolean_takes_any_value(self):
+        node = self.update_individual(self.editor, "jsonExt: " + json_arg({"sex": "F", "score": 0, "active": False}))
+        self.assertEqual(node["status"], 2, node["error"])
+        json_ext = self.person_now().json_ext
+        self.assertEqual((json_ext["score"], json_ext["active"]), (0, False))
+        self.assertEqual(json_ext["phones"], ["+257 11", "+257 22"])
+
+    def test_the_group_update_and_its_task_refuse_an_object_holding_the_mask(self):
+        from individual.services import GroupService
+
+        data = {"id": self.group.id, "json_ext": {"income": 120, "gps": {"lat": MASKED, "lon": 2.5}}}
+        for method in ("update", "create_update_task"):
+            with self.subTest(method=method):
+                result = getattr(GroupService(self.editor), method)(copy.deepcopy(data))
+                self.assertFalse(result["success"], result)
+                self.assertIn("json_ext.gps", result["detail"])
+        self.assertNotIn("gps", Group.objects.get(id=self.group.id).json_ext)
+
+    def test_a_user_with_the_masked_data_right_is_not_checked(self):
+        node = self.update_individual(self.unmasked, 'lastName: "Byron"')
+        self.assertEqual(node["status"], 2, node["error"])
+        self.assertEqual(self.person_now().last_name, "Byron")
+
+
+NESTED_QUERY = """
+query {
+  individual(id: "%(individual)s") {
+    edges { node {
+      groupindividuals { edges { node { role recipientType } } }
+      individualdatasourceSet { edges { node { jsonExt } } }
+    } }
+  }
+  group(id: "%(group)s") {
+    edges { node {
+      groupindividuals { edges { node { role individual { firstName } } } }
+      groupdatasourceSet { edges { node { jsonExt } } }
+    } }
+  }
+}
+"""
+
+
+class NestedMaskPathsTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """Memberships and upload rows reached through a person or a group are masked as the root queries mask them."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Nested village", "code": "MkN"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_nest_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_nest_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_nest_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        self.group = Group(code="MK-N1", location=village)
+        self.group.save(user=admin)
+        self.person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
+                                 location=village)
+        self.person.save(user=admin)
+        GroupIndividual(group=self.group, individual=self.person, role=GroupIndividual.Role.HEAD,
+                        recipient_type=GroupIndividual.RecipientType.PRIMARY).save(user=admin)
+        upload = IndividualDataSourceUpload(source_name="nested.csv", source_type="individual import")
+        upload.save(user=admin)
+        IndividualDataSource(upload=upload, individual=self.person,
+                             json_ext={"first_name": "Ada", "last_name": "Lovelace"}).save(user=admin)
+        GroupDataSource(upload=upload, group=self.group, json_ext={"code": "MK-N1"}).save(user=admin)
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
+        self.register(group=lambda: ["code"])
+
+    def gql(self, user):
+        response = self.query(NESTED_QUERY % {"individual": self.person.id, "group": self.group.id},
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        [person] = [edge["node"] for edge in content["data"]["individual"]["edges"]]
+        [group] = [edge["node"] for edge in content["data"]["group"]["edges"]]
+
+        def nodes(connection):
+            return [edge["node"] for edge in connection["edges"]]
+
+        return (nodes(person["groupindividuals"]), nodes(person["individualdatasourceSet"]),
+                nodes(group["groupindividuals"]), nodes(group["groupdatasourceSet"]))
+
+    def test_the_nested_paths_are_masked_without_the_masked_data_right(self):
+        [membership], [row], [group_membership], [group_row] = self.gql(self.viewer)
+        self.assertEqual((membership["role"], membership["recipientType"]), (None, None))
+        self.assertEqual(json.loads(row["jsonExt"])["first_name"], MASKED)
+        self.assertEqual((group_membership["role"], group_membership["individual"]["firstName"]), (None, MASKED))
+        self.assertEqual(json.loads(group_row["jsonExt"])["code"], MASKED)
+
+    def test_the_nested_paths_are_clear_with_the_masked_data_right(self):
+        [membership], [row], [group_membership], [group_row] = self.gql(self.unmasked)
+        self.assertEqual((membership["role"], membership["recipientType"]), ("HEAD", "PRIMARY"))
+        self.assertEqual(json.loads(row["jsonExt"])["first_name"], "Ada")
+        self.assertEqual(group_membership["individual"]["firstName"], "Ada")
+        self.assertEqual(json.loads(group_row["jsonExt"])["code"], "MK-N1")

@@ -12,6 +12,7 @@ from core.schema import OrderedDjangoFilterConnectionField
 from core.services import wait_for_mutation
 from core.utils import append_validity_filter, is_valid_uuid
 from individual.apps import IndividualConfig
+from individual.data_masking import check_export_columns
 from individual.gql_mutations import CreateIndividualMutation, UpdateIndividualMutation, DeleteIndividualMutation, \
     CreateGroupMutation, UpdateGroupMutation, DeleteGroupMutation, CreateGroupIndividualMutation, \
     UpdateGroupIndividualMutation, DeleteGroupIndividualMutation, \
@@ -47,7 +48,24 @@ def patch_details(data_df: pd.DataFrame):
     return data_df
 
 
-class Query(ExportableQueryMixin, graphene.ObjectType):
+class MaskedExportQueryMixin(ExportableQueryMixin):
+    """Core's exports, refusing the columns that read a masked field to a user without the masked-data right."""
+
+    @classmethod
+    def create_export_function(cls, field_name):
+        super().create_export_function(field_name)
+        resolver_name = f"resolve_{field_name}_export"
+        core_exporter = getattr(cls, resolver_name)
+
+        def exporter(root, info, **kwargs):
+            check_export_columns(info.context.user, getattr(cls, field_name).model,
+                                 [cls._adjust_notation(column) for column in kwargs.get("fields") or []])
+            return core_exporter(root, info, **kwargs)
+
+        setattr(cls, resolver_name, staticmethod(exporter))
+
+
+class Query(MaskedExportQueryMixin, graphene.ObjectType):
     export_patches = {
         'group': [
             patch_details
