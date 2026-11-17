@@ -17,6 +17,11 @@ _ABSENT = object()
 NAME_COLUMNS = ("first_name", "last_name")
 GROUP_NAME_KEYS = ("head", "members", "primary_recipient", "secondary_recipient")
 JSON_PREFIX = "json_ext."
+MEMBERSHIP_COLUMNS = ("role", "recipient_type")
+# Upload row keys holding a membership column: a person row's, and those of each entry of a group row's
+# ``individuals_data``.
+PERSON_ROW_MEMBERSHIP_KEYS = {"role": "individual_role", "recipient_type": "recipient_info"}
+GROUP_ROW_MEMBERS_KEY = "individuals_data"
 
 
 class RegisteredFieldsMask(DataMaskAbs):
@@ -139,14 +144,29 @@ def _is_choice_column(obj, name):
 
 class UploadRowMask(DataMaskAbs):
     """An upload row (a data source's json_ext, holding its unit's columns and json_ext keys at its top level)
-    masked by the mask of its unit, with the note of a validation error on a masked key."""
+    masked by the mask of its unit and, for the row keys holding a membership column, by the membership mask,
+    with the note of a validation error on a masked key. A path reaching a list masks each of its objects."""
 
     unit_mask = None
 
     @property
     def anon_fields(self):
-        return [JSON_PREFIX + (field[len(JSON_PREFIX):] if field.startswith(JSON_PREFIX) else field)
-                for field in self.unit_mask().anon_fields]
+        unit_fields = [JSON_PREFIX + (field[len(JSON_PREFIX):] if field.startswith(JSON_PREFIX) else field)
+                       for field in self.unit_mask().anon_fields]
+        membership = [field for field in GroupIndividualMask().anon_fields if field in MEMBERSHIP_COLUMNS]
+        return list(dict.fromkeys(unit_fields + [JSON_PREFIX + key for key in self.membership_keys(membership)]))
+
+    def membership_keys(self, columns):
+        """The row paths holding the masked membership ``columns``."""
+        return []
+
+    def _anonymize_dict_field(self, dictionary, field_parts):
+        if len(field_parts) > 1 and isinstance(dictionary.get(field_parts[0]), list):
+            for item in dictionary[field_parts[0]]:
+                if isinstance(item, dict):
+                    self._anonymize_dict_field(item, field_parts[1:])
+            return
+        super()._anonymize_dict_field(dictionary, field_parts)
 
     @property
     def masking_enabled(self):
@@ -172,10 +192,16 @@ class IndividualUploadRowMask(UploadRowMask):
     masking_model = 'IndividualDataSource'
     unit_mask = IndividualMask
 
+    def membership_keys(self, columns):
+        return [PERSON_ROW_MEMBERSHIP_KEYS[column] for column in columns]
+
 
 class GroupUploadRowMask(UploadRowMask):
     masking_model = 'GroupDataSource'
     unit_mask = GroupMask
+
+    def membership_keys(self, columns):
+        return [f"{GROUP_ROW_MEMBERS_KEY}.{column}" for column in columns]
 
 
 def may_see_masked(user):

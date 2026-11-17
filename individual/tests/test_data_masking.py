@@ -302,7 +302,7 @@ class UploadRowMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         IndividualDataSource(
             upload=self.upload, individual=person,
             json_ext={"first_name": "Ada", "last_name": "Lovelace", "dob": "1980-01-02", "phone": "+257 1",
-                      "sex": "F"},
+                      "sex": "F", "individual_role": "HEAD", "recipient_info": "PRIMARY", "group_code": "MK-U1"},
             validations={"validation_errors": [
                 {"field_name": "phone", "note": "'phone' Field value '+257 1' is duplicated in this upload"},
                 {"field_name": "sex", "note": "'sex' is required"},
@@ -311,7 +311,8 @@ class UploadRowMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         GroupDataSource(
             upload=self.upload, group=group,
             json_ext={"code": "MK-U1", "income": 120, "roof": "tin",
-                      "individuals_data": [{"individual_id": str(person.id), "role": "HEAD"}]},
+                      "individuals_data": [{"individual_id": str(person.id), "role": "HEAD",
+                                            "recipient_type": "PRIMARY"}]},
         ).save(user=admin)
         self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
         self.register()
@@ -338,10 +339,19 @@ class UploadRowMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         notes = {error["field_name"]: error["note"] for error in json.loads(row["validations"])["validation_errors"]}
         self.assertEqual(notes, {"phone": MASKED, "sex": "'sex' is required"})
         self.assertEqual(row["individual"]["firstName"], MASKED)
+        self.assertEqual((data["individual_role"], data["recipient_info"]), (MASKED, MASKED))
         data = json.loads(group_row["jsonExt"])
         self.assertEqual((data["code"], data["income"], data["roof"]), (MASKED, MASKED, "tin"))
-        self.assertEqual(data["individuals_data"][0]["role"], "HEAD")
+        self.assertEqual((data["individuals_data"][0]["role"], data["individuals_data"][0]["recipient_type"]),
+                         (MASKED, MASKED))
         self.assertEqual(group_row["group"]["code"], MASKED)
+
+    def test_the_membership_keys_of_the_rows_follow_the_membership_mask(self):
+        self.register(membership=lambda: [])
+        row, group_row = self.gql(self.viewer)
+        data = json.loads(row["jsonExt"])
+        self.assertEqual((data["individual_role"], data["recipient_info"]), ("HEAD", "PRIMARY"))
+        self.assertEqual(json.loads(group_row["jsonExt"])["individuals_data"][0]["role"], "HEAD")
 
     def test_the_rows_are_clear_with_the_masked_data_right(self):
         row, group_row = self.gql(self.unmasked)
@@ -349,12 +359,16 @@ class UploadRowMaskTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.assertEqual((data["first_name"], data["dob"], data["phone"]), ("Ada", "1980-01-02", "+257 1"))
         self.assertIn("+257 1", json.loads(row["validations"])["validation_errors"][0]["note"])
         self.assertEqual(json.loads(group_row["jsonExt"])["code"], "MK-U1")
+        self.assertEqual(json.loads(row["jsonExt"])["individual_role"], "HEAD")
+        self.assertEqual(json.loads(group_row["jsonExt"])["individuals_data"][0]["recipient_type"], "PRIMARY")
 
     def test_the_invalid_rows_download_is_masked_without_the_masked_data_right(self):
         masked = b"".join(self.download(self.viewer, download_invalid_items, upload_id=self.upload.id)
                           .streaming_content).decode()
         self.assertNotIn("Ada", masked)
         self.assertNotIn("+257 1", masked)
+        self.assertNotIn("HEAD", masked)
+        self.assertNotIn("PRIMARY", masked)
         self.assertIn("Lovelace", masked)
         clear = b"".join(self.download(self.unmasked, download_invalid_items, upload_id=self.upload.id)
                          .streaming_content).decode()
