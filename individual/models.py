@@ -62,20 +62,22 @@ class Individual(HistoryModel):
                 user._u,
                 loc_types=LocationConfig.location_types,
             )
+            if cls._location_scoped(user):
+                return queryset.filter(
+                    user_districts_match_individual | Q(Exists(cls._in_household_of(user, "id"))),
+                    ~cls._deleted_without_location("id"),
+                )
             individual_has_group = models.Q(("groupindividuals__group__isnull", False))
             user_districts_match_individual_group = LocationManager().build_user_location_filter_query(
                 user._u,
                 prefix='groupindividuals__group__location',
                 loc_types=LocationConfig.location_types,
             )
-            queryset = queryset.filter(models.Q(
+            return queryset.filter(models.Q(
                 user_districts_match_individual | (
                     individual_has_group & user_districts_match_individual_group
                 )
             ))
-            if cls._location_scoped(user):
-                queryset = queryset.filter(~cls._deleted_without_location("id"))
-            return queryset
 
         return queryset
 
@@ -85,6 +87,20 @@ class Individual(HistoryModel):
         from core.models import InteractiveUser
 
         return isinstance(user._u, InteractiveUser) and not user._u.is_superuser
+
+    @staticmethod
+    def _in_household_of(user, person):
+        """Memberships of the person the outer field ``person`` holds in a household located in ``user``'s
+        locations. A household without a location places its members nowhere."""
+        return GroupIndividual.objects.filter(
+            LocationManager().build_user_location_filter_query(
+                user._u,
+                prefix="group__location",
+                loc_types=LocationConfig.location_types,
+            ),
+            individual_id=OuterRef(person),
+            group__location__isnull=False,
+        )
 
     @classmethod
     def _deleted_without_location(cls, person):
@@ -366,4 +382,5 @@ class GroupIndividual(HistoryModel):
             return queryset
         if not Individual._location_scoped(user):
             return queryset
-        return queryset.filter(~Individual._deleted_without_location("individual_id"))
+        return queryset.filter(Exists(Individual.get_queryset(
+            Individual.objects.filter(id=OuterRef("individual_id")), user)))

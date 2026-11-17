@@ -127,8 +127,8 @@ class MaskedForeignKeyTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
     def test_an_export_writes_a_masked_location_masked(self):
         for query in ("individualExport", "groupExport"):
             with self.subTest(query=query):
-                self.assertEqual(self.exported_cells(self.viewer, query, "location.code"), {MASKED})
-                self.assertEqual(self.exported_cells(self.unmasked, query, "location.code"), {self.village.code})
+                self.assertEqual(self.exported_cells(self.viewer, query, "location"), {MASKED})
+                self.assertEqual(self.exported_cells(self.unmasked, query, "location"), {str(self.village.id)})
 
     def test_the_location_column_name_reads_and_orders_as_the_masked_location(self):
         self.assertEqual(self.exported_cells(self.viewer, "individualExport", "locationId"), {MASKED})
@@ -151,7 +151,7 @@ class MaskedForeignKeyTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.assertTrue(codes)
         self.assertEqual(codes, [None] * len(codes))
         for query in ("individualExport", "groupExport"):
-            self.assertEqual(self.exported_cells(self.viewer, query, "location.code"), {MASKED})
+            self.assertEqual(self.exported_cells(self.viewer, query, "location"), {MASKED})
         person = Individual.objects.get(id=self.person.id)
         mask_for_user(self.viewer, "Individual", person)
         self.assertEqual((person.location_id, person.json_ext["location_name"]), (None, MASKED))
