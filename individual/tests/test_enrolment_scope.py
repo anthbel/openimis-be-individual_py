@@ -1,4 +1,5 @@
 import datetime
+import json
 
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user
@@ -60,3 +61,19 @@ class EnrolmentScopeTest(openIMISGraphQLTestCase):
     def test_a_group_enrolment_selects_the_groups_of_the_user_locations_only(self):
         self.enroll("confirmGroupEnrollment", self.group_plan, "roof__iexact__string=tin")
         self.assertEqual(self.selected(self.group_plan), {"OwnHead"})
+
+    def test_the_enrolment_summaries_count_the_units_of_the_user_locations_only(self):
+        token = BaseTestContext(user=self.user).get_jwt()
+        response = self.query(
+            '{ individualEnrollmentSummary(customFilters: ["sex__iexact__string=F"], benefitPlanId: "%s") '
+            '{ numberOfSelectedIndividuals totalNumberOfIndividuals numberOfIndividualsToUpload } '
+            'groupEnrollmentSummary(customFilters: ["roof__iexact__string=tin"], benefitPlanId: "%s") '
+            '{ numberOfSelectedGroups totalNumberOfGroups numberOfGroupsToUpload } }'
+            % (self.person_plan.id, self.group_plan.id),
+            headers={"HTTP_AUTHORIZATION": f"Bearer {token}"})
+        self.assertResponseNoErrors(response)
+        data = json.loads(response.content)["data"]
+        self.assertEqual(data["individualEnrollmentSummary"], {
+            "numberOfSelectedIndividuals": "1", "totalNumberOfIndividuals": "2", "numberOfIndividualsToUpload": "1"})
+        self.assertEqual(data["groupEnrollmentSummary"], {
+            "numberOfSelectedGroups": "1", "totalNumberOfGroups": "1", "numberOfGroupsToUpload": "1"})

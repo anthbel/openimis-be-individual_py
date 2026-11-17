@@ -282,7 +282,8 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         ).exclude(
             is_deleted=True
         ).values('individual')
-        query = Individual.objects.filter(is_deleted=False)
+        visible = Individual.get_queryset(Individual.objects.filter(is_deleted=False), info.context.user)
+        query = visible
         custom_filters = kwargs.get("customFilters", None)
         check_filter_lookups(info.context.user, Individual, custom_filter_lookups(custom_filters))
         benefit_plan_id = kwargs.get("benefitPlanId", None)
@@ -298,7 +299,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         number_of_selected_individuals = query.count()
 
         # Aggregation for total number of individuals
-        total_number_of_individuals = Individual.objects.filter(is_deleted=False).count()
+        total_number_of_individuals = visible.distinct().count()
         individuals_not_assigned_to_programme = query.\
             filter(is_deleted=False, beneficiary__benefit_plan_id__isnull=True).count()
         individuals_assigned_to_programme = number_of_selected_individuals - individuals_not_assigned_to_programme
@@ -485,7 +486,8 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
     def resolve_group_enrollment_summary(self, info, **kwargs):
         Query._check_permissions(info.context.user,
                                  IndividualConfig.gql_group_search_perms)
-        query = Group.objects.filter(is_deleted=False)
+        visible = Group.get_queryset(Group.objects.filter(is_deleted=False), info.context.user)
+        query = visible
         custom_filters = kwargs.get("customFilters", None)
         check_filter_lookups(info.context.user, Group, custom_filter_lookups(custom_filters))
         benefit_plan_id = kwargs.get("benefitPlanId", None)
@@ -500,7 +502,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         number_of_selected_groups = query.count()
 
         # Aggregation for total number of groups
-        total_number_of_groups = Group.objects.filter(is_deleted=False).count()
+        total_number_of_groups = visible.count()
         groups_not_assigned_to_programme = query.\
             filter(is_deleted=False, groupbeneficiary__benefit_plan_id__isnull=True).count()
         groups_assigned_to_programme = number_of_selected_groups - groups_not_assigned_to_programme
