@@ -244,13 +244,29 @@ class Group(HistoryModel):
             return queryset.filter(id=-1)
 
         if not user.is_imis_admin:
-            return queryset.filter(
-                LocationManager().build_user_location_filter_query(
-                    user._u,
-                    loc_types=LocationConfig.location_types,
-                )
+            in_user_locations = LocationManager().build_user_location_filter_query(
+                user._u,
+                loc_types=LocationConfig.location_types,
             )
+            if Individual._location_scoped(user):
+                return queryset.filter(
+                    Q(location__isnull=False) & in_user_locations
+                    | Q(location__isnull=True) & ~Exists(cls._member_located_elsewhere(user))
+                )
+            return queryset.filter(in_user_locations)
         return queryset
+
+    @staticmethod
+    def _member_located_elsewhere(user):
+        """Live memberships of the household the outer ``id`` holds whose person has a location outside
+        ``user``'s locations: an unlocated household with such a member would show that member."""
+        return GroupIndividual.objects.filter(group_id=OuterRef("id"), is_deleted=False).exclude(
+            LocationManager().build_user_location_filter_query(
+                user._u,
+                prefix="individual__location",
+                loc_types=LocationConfig.location_types,
+            )
+        )
 
 
 @receiver(post_save, sender=Group)
