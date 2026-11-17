@@ -271,20 +271,36 @@ def _json_path(parts):
     return ".".join(parts)
 
 
+def _reads_relation_path(parts, path):
+    """Whether the lookup ``parts`` read the dotted mask field ``path`` that reaches a related model's field
+    (``group.code``, ``group.json_ext.income``): they reach it or a part of it, or a ``json_ext`` holding it."""
+    path = path.split(".")
+    if "json_ext" in parts:
+        start = parts.index("json_ext") + 1
+        parts = [*parts[:start], *filter(None, _json_path(parts[start:]).split("."))]
+    if parts[:len(path)] == path:
+        return True
+    return path[:len(parts)] == parts and "json_ext" in parts
+
+
 def reads_masked_field(model, lookup):
     """Whether the ``__`` lookup ``lookup`` from ``model`` reads a field the mask registered for a model it
-    reaches masks; a whole ``json_ext`` is masked while any of its paths is."""
+    reaches masks; a whole ``json_ext`` is masked while any of its paths is. A mask field is a column, a
+    ``json_ext.<key>`` path, or a dotted path through a relation (``group.code``)."""
     parts = lookup.split("__")
     for index, part in enumerate(parts):
         mask = MaskingClassStorage.get_masking_class(model.__name__)
         fields = mask.anon_fields if mask is not None and mask.masking_enabled else []
+        relation_paths = [field for field in fields if "." in field and not field.startswith(JSON_PREFIX)]
+        if any(_reads_relation_path(parts[index:], path) for path in relation_paths):
+            return True
         if part == "json_ext" and fields:
             path = _json_path(parts[index + 1:])
             masked = [field[len(JSON_PREFIX):] for field in fields if field.startswith(JSON_PREFIX)]
             if not path:
                 return bool(masked)
             return any(path == key or path.startswith(f"{key}.") or key.startswith(f"{path}.") for key in masked)
-        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+        if part in {field for field in fields if "." not in field}:
             return True
         try:
             field = model._meta.get_field(part)

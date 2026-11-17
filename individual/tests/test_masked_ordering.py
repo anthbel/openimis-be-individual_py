@@ -1,7 +1,11 @@
+from types import SimpleNamespace
+from unittest import mock
+
 from django.test import TestCase
 
+from core.data_masking import MaskingClassStorage
 from core.test_helpers import create_right_only_user
-from individual.data_masking import masked_order_by
+from individual.data_masking import masked_order_by, reads_masked_field
 from individual.models import (
     Group, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload,
 )
@@ -65,3 +69,16 @@ class MaskedOrderByTest(RegisteredFieldsTestMixin, TestCase):
         self.assertEqual(masked_order_by(self.viewer, Individual, "lastName"), ["lastName", "id"])
         self.assertEqual(masked_order_by(self.viewer, Individual, None), None)
         self.assertEqual(masked_order_by(self.viewer, Individual, ["?"]), ["?", "id"])
+
+    def test_a_mask_field_through_a_relation_masks_only_its_path(self):
+        get_masking_class = MaskingClassStorage.get_masking_class
+        mask = SimpleNamespace(masking_enabled=True, anon_fields=["group.code", "group.json_ext.income"])
+        with mock.patch.object(MaskingClassStorage, "get_masking_class",
+                               side_effect=lambda name: mask if name == "GroupIndividual" else get_masking_class(name)):
+            for lookup in ("group__code", "group__code__icontains", "group__json_ext__income",
+                           "group__json_ext__income__lt", "group__json_ext", "group__json_ext__icontains"):
+                self.assertTrue(reads_masked_field(GroupIndividual, lookup), lookup)
+            for lookup in ("group", "group__id", "group__json_ext__roof", "group__date_created", "role"):
+                self.assertFalse(reads_masked_field(GroupIndividual, lookup), lookup)
+            self.assertEqual(masked_order_by(self.viewer, GroupIndividual, ["group__jsonExt__roof", "-group__code"]),
+                             ["group__jsonExt__roof", "id"])
