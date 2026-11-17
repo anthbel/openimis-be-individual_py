@@ -250,6 +250,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         parent_location = kwargs.get('parent_location')
         parent_location_level = kwargs.get('parent_location_level')
         if parent_location is not None and parent_location_level is not None:
+            check_filter_lookups(info.context.user, Individual, ["location"])
             filters.append(Query._get_location_filters(parent_location, parent_location_level))
 
         query = IndividualGQLType.get_queryset(None, info)
@@ -398,6 +399,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         parent_location = kwargs.get('parent_location')
         parent_location_level = kwargs.get('parent_location_level')
         if parent_location is not None and parent_location_level is not None:
+            check_filter_lookups(info.context.user, Group, ["location"])
             filters.append(Query._get_location_filters(parent_location, parent_location_level))
 
         query = GroupGQLType.get_queryset(None, info)
