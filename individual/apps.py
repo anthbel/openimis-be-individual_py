@@ -1,8 +1,11 @@
 import copy
 import json
 import logging
+from datetime import datetime
 
 from django.apps import AppConfig
+from django.core.signals import request_started
+from django.db.models import Q
 
 from core.custom_filters import CustomFilterRegistryPoint
 from core.data_masking import MaskingClassRegistryPoint
@@ -168,17 +171,22 @@ class IndividualConfig(AppConfig):
     individual_import_duplicate_policy = None
     group_json_ext_keys_not_copied_from_head = None
 
+    # The merged stored configuration in use.
+    _applied_config = None
+
     def ready(self):
         from core.models import ModuleConfiguration
 
         cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
         self.__load_config(cfg)
+        IndividualConfig._applied_config = cfg
         self.__validate_individual_schema(cfg)
         self.__initialize_custom_filters()
         self._set_up_workflows()
         self.__register_masking_class()
         register_validator(self.name, self._validate_module_config)
         register_reloader(self.name, self._reload_module_config)
+        request_started.connect(self._on_request_started, weak=False, dispatch_uid=f"{MODULE_NAME}_config_refresh")
 
     def _merge_with_defaults(self, instance):
         # `instance._cfg` has already stripped the `_perms` keys from the stored
@@ -191,8 +199,12 @@ class IndividualConfig(AppConfig):
         self.__validate_individual_schema(cfg)
 
     def _reload_module_config(self, instance):
-        cfg = self._merge_with_defaults(instance)
+        self._apply_config(self._merge_with_defaults(instance))
+
+    def _apply_config(self, cfg):
+        """Puts the merged configuration ``cfg`` in use, with the custom filters and workflows it defines."""
         self.__load_config(cfg)
+        IndividualConfig._applied_config = cfg
 
         # Reinitialize custom filters to apply the new schema
         self.__initialize_custom_filters()
@@ -201,6 +213,27 @@ class IndividualConfig(AppConfig):
         self._set_up_workflows()
 
         logger.info(f"Reloaded app configs for {self.name} module")
+
+    def _on_request_started(self, sender=None, **kwargs):
+        self.refresh_config()
+
+    def refresh_config(self):
+        """Applies the stored configuration when it differs from the one in use, so a configuration saved by
+        another process (the person mask fields and individual_schema among it) applies from this process's
+        next request: one query, no reload when unchanged. A failure is logged and the configuration in use
+        stays."""
+        from core.models import ModuleConfiguration
+
+        try:
+            row = ModuleConfiguration.objects.filter(
+                Q(is_disabled_until=None) | Q(is_disabled_until__lt=datetime.now()),
+                layer="be", module=self.name,
+            ).first()
+            cfg = {**copy.deepcopy(DEFAULT_CONFIG), **(row._cfg if row else {})}
+            if cfg != IndividualConfig._applied_config:
+                self._apply_config(cfg)
+        except Exception as exc:
+            logger.error("%s: stored configuration not applied, the one in use stays: %s", self.name, exc)
 
     @classmethod
     def __load_config(cls, cfg):

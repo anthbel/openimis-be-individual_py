@@ -63,6 +63,8 @@ It is dedicated to be deployed as a module of [openimis-be_py](https://github.co
 * group_json_ext_keys_not_copied_from_head: group json_ext keys that keep the group's value when the head's json_ext is copied onto the group on a membership change (default: []). Other head values overwrite the group's, a head value set to null removes the key from the group, and keys the head does not have are left as they are.
 * individual_masking_enabled, individual_mask_fields: whether `individual_mask_fields` (column names or `json_ext.<key>` paths) are masked for users without the masked-data right (`gql_query_enable_viewing_masked_data_perms`). Read when a mask is applied, so a reloaded configuration applies.
 
+Each process compares the stored configuration with the one it applied at the start of every request (one query) and applies it when it differs, with its custom filters and workflows; a configuration saved by another process (`individual_mask_fields`, `individual_schema`, ...) therefore applies in every process from its next request. A stored configuration that cannot be read is logged and the one in use stays.
+
 ## Data masking
 `individual/data_masking.py` registers eight `core.data_masking` masks: `Individual` and `HistoricalIndividual` (the person mask), `Group` and `HistoricalGroup` (the group mask), `GroupIndividual` and `HistoricalGroupIndividual` (the membership mask), and the upload row masks `IndividualDataSource` and `GroupDataSource`. For a user without the masked-data right they mask:
 * persons: `individual_mask_fields` while `individual_masking_enabled`, and the fields other modules register with `IndividualMask.register_fields(key, source)`;
