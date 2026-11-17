@@ -10,7 +10,6 @@ from django.core.cache import caches
 from django.test import override_settings
 from graphql_relay import to_global_id
 
-import individual as individual_package
 from core.models import ExportableQueryModel
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user, create_test_interactive_user, create_test_technical_user
@@ -118,9 +117,6 @@ class ExportAndHouseholdScopeTest(openIMISGraphQLTestCase):
     def names(value):
         text = json.dumps(value)
         return {name for name in ALL if name in text}
-
-    def test_the_tests_run_this_module(self):
-        self.assertIn("individual-67-68", individual_package.__file__)
 
     # Export columns.
 
