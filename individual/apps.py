@@ -251,6 +251,8 @@ class IndividualConfig(AppConfig):
                                 GroupIndividualMask(), GroupIndividualHistoryMask(),
                                 IndividualUploadRowMask(), GroupUploadRowMask()]
         )
+        from individual.task_masking import HistoricalTaskMask, TaskMask
+        MaskingClassRegistryPoint.register_masking_class(masking_class_list=[TaskMask(), HistoricalTaskMask()])
 
     def _set_up_workflows(self):
         from workflow.systems.python import PythonWorkflowAdaptor

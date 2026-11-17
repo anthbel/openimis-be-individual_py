@@ -27,6 +27,7 @@ from individual.models import (
     IndividualDataUploadRecords,
     IndividualDataSourceUpload
 )
+from individual.task_masking import group_code, person_name
 from individual.utils import (
     load_dataframe,
     fetch_summary_of_broken_items
@@ -409,7 +410,7 @@ class CreateGroupAndMoveIndividualService(CreateCheckerLogicServiceMixin):
         def serialize(key, value):
             if key == 'group_individual_id':
                 group_individual = GroupIndividual.objects.get(id=value)
-                return f'{group_individual.individual.first_name} {group_individual.individual.last_name}'
+                return person_name(self.user, group_individual.individual)
             return value
 
         serialized_data = crud_business_data_builder(data, serialize)
@@ -459,10 +460,10 @@ class GroupIndividualService(BaseService, UpdateCheckerLogicServiceMixin):
         def serialize(key, value):
             if key == 'id':
                 group_individual = GroupIndividual.objects.get(id=value)
-                return f'{group_individual.individual.first_name} {group_individual.individual.last_name}'
+                return person_name(self.user, group_individual.individual)
             if key == 'group_id':
                 group = Group.objects.get(id=value)
-                return group.code
+                return group_code(self.user, group)
             return value
 
         serialized_data = crud_business_data_builder(data, serialize)
