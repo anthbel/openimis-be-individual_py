@@ -77,7 +77,7 @@ Upload rows are masked by the mask of the unit they hold (`IndividualDataSource`
 
 A mask whose fields cannot be computed (a registered source raising) makes the fields of the object it masks resolve to errors, never to the stored values.
 
-For a user without the masked-data right, a person or group update (`updateIndividual`, `updateGroup`, directly or through the update task) refuses a masked field given the value the mask shows for it, naming the field. In `updateIndividual` the person fields are optional and a field left out keeps its value; `dob` (type `DateOrMask`: a `YYYY-MM-DD` date, or the mask) given as the mask keeps the stored date, and a masked `json_ext` key left out of the given `jsonExt` keeps its stored value.
+For a user without the masked-data right, a person or group update (`updateIndividual`, `updateGroup`, directly or through the update task) refuses a masked field given a value holding the string mask (the value itself, or a leaf of its lists and objects at any depth), naming the field; a number or boolean is written as given. In `updateIndividual` the person fields are optional and a field left out keeps its value; `dob` (type `DateOrMask`: a `YYYY-MM-DD` date, or the mask) given as the mask keeps the stored date, and a masked `json_ext` key left out of the given `jsonExt` keeps its stored value.
 
 `individualExport`, `groupExport` and `groupIndividualExport` read the stored values, so a column reading a masked field (a whole `jsonExt` while any of its keys is masked, a column of a person or group reached through a relation included) is refused to a user without the masked-data right.
 

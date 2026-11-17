@@ -277,10 +277,23 @@ def _equal(left, right):
         return False
 
 
+def _holds_placeholder(value):
+    """Whether ``value`` is the string mask or holds it as a leaf of its lists and objects, at any depth."""
+    if isinstance(value, str):
+        return value == MASK_PLACEHOLDER
+    if isinstance(value, dict):
+        return any(_holds_placeholder(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_placeholder(item) for item in value)
+    return False
+
+
 def check_masked_values_sent_back(user, masking_model, instance, obj_data):
-    """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field the
-    value the mask shows for it, naming the field. A date column given the mask, and a masked json_ext key that
-    the update's json_ext leaves out, keep their stored value (``obj_data`` is adjusted in place)."""
+    """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field a
+    value holding the string mask (the value itself, or a leaf of its lists and objects), naming the field.
+    Another value, a number or boolean equal to what the mask shows included, is written as given. A date column
+    given the mask, and a masked json_ext key that the update's json_ext leaves out, keep their stored value
+    (``obj_data`` is adjusted in place)."""
     if instance is None or may_see_masked(user):
         return
     mask = MaskingClassStorage.get_masking_class(masking_model)
@@ -292,14 +305,12 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
         if name not in obj_data:
             continue
         stored = _value_at(getattr(instance, name, None), path)
-        if stored is _ABSENT:
-            continue
         incoming = _value_at(obj_data[name], path)
         if incoming is _ABSENT:
-            if path and isinstance(obj_data[name], dict):
+            if path and isinstance(obj_data[name], dict) and stored is not _ABSENT:
                 _set_at(obj_data[name], path, copy.deepcopy(stored))
             continue
-        if not _equal(incoming, mask.anonymize(copy.deepcopy(stored))) or _equal(incoming, stored):
+        if not _holds_placeholder(incoming) or _equal(incoming, stored):
             continue
         if not path and isinstance(stored, (datetime.date, datetime.datetime)):
             del obj_data[name]

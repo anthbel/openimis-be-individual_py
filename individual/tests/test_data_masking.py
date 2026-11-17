@@ -1,3 +1,4 @@
+import copy
 import datetime
 import json
 from unittest import mock
@@ -456,6 +457,12 @@ class FailingSourceTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
 
 
 UPDATE_PERMS = SEARCH_PERMS + ["gql_individual_update_perms", "gql_group_update_perms"]
+NESTED_KEYS = ("phones", "address", "score", "active")
+
+
+def json_arg(value):
+    """``value`` as a GraphQL string literal of its JSON."""
+    return json.dumps(json.dumps(value))
 
 
 class MaskedValueSentBackTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
@@ -472,11 +479,14 @@ class MaskedValueSentBackTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase
         self.village = village
         self.group = Group(code="MK-W1", location=village, json_ext={"income": 120})
         self.group.save(user=admin)
-        self.person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
-                                 location=village, json_ext={"phone": "+257 1", "sex": "F"})
+        self.person = Individual(
+            first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2), location=village,
+            json_ext={"phone": "+257 1", "sex": "F", "phones": ["+257 11", "+257 22"],
+                      "address": {"hill": "Rohero", "colline": "Kiriri"}, "score": 5, "active": True})
         self.person.save(user=admin)
         self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.editor, self.unmasked)}
-        self.register(group=lambda: ["code"])
+        self.register(person=lambda: [*person_fields(), *(f"json_ext.{key}" for key in NESTED_KEYS)],
+                      group=lambda: ["code", "json_ext.gps"])
         patcher = mock.patch.object(IndividualConfig, "check_individual_update", False)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -535,7 +545,108 @@ class MaskedValueSentBackTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase
         self.assertIn("code", node["error"])
         self.assertEqual(Group.objects.get(id=self.group.id).code, "MK-W1")
 
+    def test_a_list_or_object_holding_the_mask_is_refused(self):
+        node = self.update_individual(self.editor, "jsonExt: " + json_arg({
+            "sex": "F", "phones": [MASKED, MASKED, "+257 33"], "address": {"hill": MASKED, "colline": "Nyakabiga"}}))
+        self.assertNotEqual(node["status"], 2, node)
+        self.assertIn("json_ext.phones", node["error"])
+        self.assertIn("json_ext.address", node["error"])
+        json_ext = self.person_now().json_ext
+        self.assertEqual(json_ext["phones"], ["+257 11", "+257 22"])
+        self.assertEqual(json_ext["address"], {"hill": "Rohero", "colline": "Kiriri"})
+
+    def test_a_masked_number_or_boolean_takes_any_value(self):
+        node = self.update_individual(self.editor, "jsonExt: " + json_arg({"sex": "F", "score": 0, "active": False}))
+        self.assertEqual(node["status"], 2, node["error"])
+        json_ext = self.person_now().json_ext
+        self.assertEqual((json_ext["score"], json_ext["active"]), (0, False))
+        self.assertEqual(json_ext["phones"], ["+257 11", "+257 22"])
+
+    def test_the_group_update_and_its_task_refuse_an_object_holding_the_mask(self):
+        from individual.services import GroupService
+
+        data = {"id": self.group.id, "json_ext": {"income": 120, "gps": {"lat": MASKED, "lon": 2.5}}}
+        for method in ("update", "create_update_task"):
+            with self.subTest(method=method):
+                result = getattr(GroupService(self.editor), method)(copy.deepcopy(data))
+                self.assertFalse(result["success"], result)
+                self.assertIn("json_ext.gps", result["detail"])
+        self.assertNotIn("gps", Group.objects.get(id=self.group.id).json_ext)
+
     def test_a_user_with_the_masked_data_right_is_not_checked(self):
         node = self.update_individual(self.unmasked, 'lastName: "Byron"')
         self.assertEqual(node["status"], 2, node["error"])
         self.assertEqual(self.person_now().last_name, "Byron")
+
+
+NESTED_QUERY = """
+query {
+  individual(id: "%(individual)s") {
+    edges { node {
+      groupindividuals { edges { node { role recipientType } } }
+      individualdatasourceSet { edges { node { jsonExt } } }
+    } }
+  }
+  group(id: "%(group)s") {
+    edges { node {
+      groupindividuals { edges { node { role individual { firstName } } } }
+      groupdatasourceSet { edges { node { jsonExt } } }
+    } }
+  }
+}
+"""
+
+
+class NestedMaskPathsTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """Memberships and upload rows reached through a person or a group are masked as the root queries mask them."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Nested village", "code": "MkN"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_nest_admin", SEARCH_PERMS, [district])
+        self.viewer = create_right_only_user("mask_nest_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_nest_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        self.group = Group(code="MK-N1", location=village)
+        self.group.save(user=admin)
+        self.person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
+                                 location=village)
+        self.person.save(user=admin)
+        GroupIndividual(group=self.group, individual=self.person, role=GroupIndividual.Role.HEAD,
+                        recipient_type=GroupIndividual.RecipientType.PRIMARY).save(user=admin)
+        upload = IndividualDataSourceUpload(source_name="nested.csv", source_type="individual import")
+        upload.save(user=admin)
+        IndividualDataSource(upload=upload, individual=self.person,
+                             json_ext={"first_name": "Ada", "last_name": "Lovelace"}).save(user=admin)
+        GroupDataSource(upload=upload, group=self.group, json_ext={"code": "MK-N1"}).save(user=admin)
+        self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
+        self.register(group=lambda: ["code"])
+
+    def gql(self, user):
+        response = self.query(NESTED_QUERY % {"individual": self.person.id, "group": self.group.id},
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        [person] = [edge["node"] for edge in content["data"]["individual"]["edges"]]
+        [group] = [edge["node"] for edge in content["data"]["group"]["edges"]]
+
+        def nodes(connection):
+            return [edge["node"] for edge in connection["edges"]]
+
+        return (nodes(person["groupindividuals"]), nodes(person["individualdatasourceSet"]),
+                nodes(group["groupindividuals"]), nodes(group["groupdatasourceSet"]))
+
+    def test_the_nested_paths_are_masked_without_the_masked_data_right(self):
+        [membership], [row], [group_membership], [group_row] = self.gql(self.viewer)
+        self.assertEqual((membership["role"], membership["recipientType"]), (None, None))
+        self.assertEqual(json.loads(row["jsonExt"])["first_name"], MASKED)
+        self.assertEqual((group_membership["role"], group_membership["individual"]["firstName"]), (None, MASKED))
+        self.assertEqual(json.loads(group_row["jsonExt"])["code"], MASKED)
+
+    def test_the_nested_paths_are_clear_with_the_masked_data_right(self):
+        [membership], [row], [group_membership], [group_row] = self.gql(self.unmasked)
+        self.assertEqual((membership["role"], membership["recipientType"]), ("HEAD", "PRIMARY"))
+        self.assertEqual(json.loads(row["jsonExt"])["first_name"], "Ada")
+        self.assertEqual(group_membership["individual"]["firstName"], "Ada")
+        self.assertEqual(json.loads(group_row["jsonExt"])["code"], "MK-N1")
