@@ -200,10 +200,11 @@ class GroupStepFailedRowTest(TestCase):
         self.assertTrue(result['success'], result)
         upload = IndividualDataSourceUpload(source_name='failed-row', source_type='test')
         upload.save(user=self.user)
-        source = GroupDataSource(upload=upload, json_ext={
+        json_ext = {
             'id': result['data']['id'], 'code': result['data']['code'],
             'individuals_data': [{'individual_id': str(head.id)}, {'individual_id': str(uuid4())}],
-        })
+        }
+        source = GroupDataSource(upload=upload, json_ext=dict(json_ext))
         source.save(user=self.user)
 
         BaseGroupColumnAggregationClass.group_data_sources_into_entities(upload.id, self.user)
@@ -211,3 +212,4 @@ class GroupStepFailedRowTest(TestCase):
         source.refresh_from_db()
         self.assertIsNone(source.group_id)
         self.assertTrue(source.validations.get('group_step'), source.validations)
+        self.assertEqual(source.json_ext, json_ext)

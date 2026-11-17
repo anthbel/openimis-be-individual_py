@@ -1,3 +1,4 @@
+import copy
 import logging
 import random
 import string
@@ -178,7 +179,8 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
         service = GroupService(user)
         _precheck_group_step(service, upload_id, pending if precheck_pending else data_sources)
         for source in data_sources:
-            obj_data = source.json_ext
+            # GroupService pops individuals_data from the dict it is given; the row keeps its own.
+            obj_data = copy.deepcopy(source.json_ext)
             if obj_data.get('id'):
                 result = service.update(obj_data)
             else:
