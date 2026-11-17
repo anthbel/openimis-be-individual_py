@@ -1,6 +1,9 @@
 import datetime
 import json
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user
 from individual.models import Group, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload
@@ -16,6 +19,7 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         super().setUp()
         village = create_test_village({"name": "Filter village", "code": "MkF"})
         district = village.parent.parent.code
+        self.village, self.district = village, district
         admin = create_right_only_user("mask_flt_admin", SEARCH_PERMS, [district])
         self.viewer = create_right_only_user("mask_flt_viewer", SEARCH_PERMS, [district])
         self.unmasked = create_right_only_user(
@@ -114,3 +118,36 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                                  list(reversed(self.ordered_first_names(self.unmasked, descending))))
         self.assertEqual(self.ordered_first_names(self.viewer, "lastName"), ["Byron", "Lovelace"])
         self.assertEqual(self.ordered_first_names(self.viewer, "-lastName"), ["Lovelace", "Byron"])
+
+    def test_a_list_ordered_on_a_masked_field_pages_through_every_row_once(self):
+        admin = create_right_only_user("mask_flt_pager", SEARCH_PERMS, [self.district])
+        for index in range(7):
+            Individual(first_name="Same", last_name=f"Page{index}", dob=datetime.date(1990, 1, 1),
+                       location=self.village).save(user=admin)
+        expected = set(Individual.objects.filter(is_deleted=False).values_list("id", flat=True))
+        query = '{ individual(orderBy: ["firstName"], first: 2%s) { totalCount pageInfo { hasNextPage endCursor } ' \
+                'edges { node { id uuid } } } }'
+        seen, after = [], ""
+        with CaptureQueriesContext(connection) as queries:
+            while True:
+                content = self.gql(self.viewer, query % after)
+                self.assertNotIn("errors", content)
+                page = content["data"]["individual"]
+                seen += [node["node"]["uuid"] for node in page["edges"]]
+                if not page["pageInfo"]["hasNextPage"]:
+                    break
+                after = ', after: "%s"' % page["pageInfo"]["endCursor"]
+        self.assertEqual(sorted(seen), sorted(str(uuid) for uuid in expected))
+        self.assertEqual(len(seen), len(set(seen)))
+        paged = [query["sql"] for query in queries.captured_queries
+                 if 'FROM "individual_individual"' in query["sql"] and "LIMIT" in query["sql"]]
+        self.assertTrue(paged)
+        for sql in paged:
+            self.assertIn('ORDER BY "individual_individual"."UUID" ASC LIMIT', sql)
+
+    def test_an_ordering_by_unmasked_fields_ends_with_the_primary_key(self):
+        with CaptureQueriesContext(connection) as queries:
+            content = self.gql(self.viewer, '{ individual(orderBy: ["lastName"], first: 1) { edges { node { id } } } }')
+        self.assertNotIn("errors", content)
+        self.assertTrue(any('ORDER BY "individual_individual"."last_name" ASC, "individual_individual"."UUID" ASC'
+                            in query["sql"] for query in queries.captured_queries))

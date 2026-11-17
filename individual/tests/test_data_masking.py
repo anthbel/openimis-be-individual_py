@@ -734,3 +734,56 @@ class NestedMaskPathsTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.assertEqual(json.loads(row["jsonExt"])["first_name"], "Ada")
         self.assertEqual(group_membership["individual"]["firstName"], "Ada")
         self.assertEqual(json.loads(group_row["jsonExt"])["code"], "MK-N1")
+
+
+class MaskedMembershipSentBackTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """A masked role or recipient type reads as null; null sent back by a user without the masked-data right keeps
+    the stored value."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Membership update village", "code": "MkMu"})
+        district = village.parent.parent.code
+        admin = create_right_only_user("mask_gu_admin", SEARCH_PERMS, [district])
+        self.editor = create_right_only_user("mask_gu_editor", UPDATE_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_gu_unmasked", UPDATE_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        self.group = Group(code="MK-GU1", location=village)
+        self.group.save(user=admin)
+        person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2), location=village)
+        person.save(user=admin)
+        self.membership = GroupIndividual(group=self.group, individual=person, role=GroupIndividual.Role.HEAD,
+                                          recipient_type=GroupIndividual.RecipientType.PRIMARY)
+        self.membership.save(user=admin)
+        self.register(person=lambda: [], group=lambda: [])
+
+    def update(self, user, method="update", **fields):
+        from individual.services import GroupIndividualService
+
+        data = {"id": self.membership.id, "group_id": self.group.id, **fields}
+        return getattr(GroupIndividualService(user), method)(data)
+
+    def stored(self):
+        membership = GroupIndividual.objects.get(id=self.membership.id)
+        return membership.role, membership.recipient_type
+
+    def test_a_masked_role_sent_back_as_null_keeps_the_stored_role(self):
+        result = self.update(self.editor, role=None)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(self.stored(), ("HEAD", "PRIMARY"))
+
+    def test_the_update_task_keeps_a_masked_role_sent_back_as_null(self):
+        from tasks_management.models import Task
+
+        result = self.update(self.editor, "create_update_task", role=None)
+        self.assertTrue(result["success"], result)
+        task = Task.objects.order_by("-date_created").first()
+        self.assertNotIn("role", task.data["incoming_data"])
+
+    def test_a_new_role_and_a_null_from_the_masked_data_right_are_written(self):
+        result = self.update(self.editor, role="SON")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(self.stored()[0], "SON")
+        result = self.update(self.unmasked, role=None)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(self.stored(), (None, "PRIMARY"))

@@ -428,11 +428,20 @@ class GroupIndividualService(BaseService, UpdateCheckerLogicServiceMixin):
     def create(self, obj_data):
         return super().create(obj_data)
 
+    def create_update_task(self, obj_data):
+        refused = refuse_masked_values_sent_back(self, "GroupIndividual", obj_data)
+        if refused:
+            return refused
+        return super().create_update_task(obj_data)
+
     @check_authentication
     @register_service_signal('groupindividual_service.update')
     def update(self, obj_data):
         try:
             with transaction.atomic():
+                refused = refuse_masked_values_sent_back(self, "GroupIndividual", obj_data)
+                if refused:
+                    return refused
                 group_individual_id = obj_data.get('id')
                 incoming_group_id = obj_data.get('group_id')
                 group_individual = GroupIndividual.objects.filter(id=group_individual_id, is_deleted=False).first()

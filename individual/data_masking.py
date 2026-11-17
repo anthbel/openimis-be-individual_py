@@ -1,5 +1,6 @@
 import copy
 import datetime
+import logging
 import math
 from decimal import Decimal
 
@@ -11,6 +12,8 @@ from graphene.types.resolver import dict_or_attr_resolver
 from core.apps import CoreConfig
 from core.data_masking import DataMaskAbs, MaskingClassStorage
 from individual.apps import IndividualConfig
+
+logger = logging.getLogger(__name__)
 
 MASK_PLACEHOLDER = DataMaskAbs().anonymize("")
 _ABSENT = object()
@@ -323,11 +326,20 @@ def order_lookups(order_by):
 
 def unmasked_order_by(user, model, order_by):
     """``order_by`` less its terms ordering by a masked field, for a user without the masked-data right: such an
-    ordering would tell the masked values, and leaving it out keeps the list readable."""
-    if not order_by or may_see_masked(user):
+    ordering would tell the masked values, and leaving it out keeps the list readable. The model's primary key
+    orders last, so the order stays total and pages neither repeat nor skip rows."""
+    if not order_by:
         return order_by
-    terms = [order_by] if isinstance(order_by, str) else order_by
-    return [term for term in terms if not any(reads_masked_field(model, lookup) for lookup in order_lookups([term]))]
+    terms = [order_by] if isinstance(order_by, str) else list(order_by)
+    kept = terms if may_see_masked(user) else [
+        term for term in terms if not any(reads_masked_field(model, lookup) for lookup in order_lookups([term]))]
+    if len(kept) < len(terms):
+        logger.info("orderBy %s of %s left out for a user without the masked-data right",
+                    [term for term in terms if term not in kept], model.__name__)
+    primary_key = model._meta.pk.name
+    if primary_key not in order_lookups(kept):
+        kept = [*kept, primary_key]
+    return kept
 
 
 def custom_filter_lookups(custom_filters, relation=None):
@@ -472,8 +484,9 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
     """Refuses an update of ``instance`` by a user without the masked-data right that gives a masked field the
     string mask where the stored value is a string or is missing (the value itself, or a leaf of its lists and
     objects), naming the field. A leaf given the mask where a number or boolean is stored, a date column given
-    the mask, and a masked json_ext key that the update's json_ext leaves out keep their stored value
-    (``obj_data`` is adjusted in place). Any other value is written as given."""
+    the mask, a masked choice column given null (the form its mask shows), and a masked json_ext key that the
+    update's json_ext leaves out keep their stored value (``obj_data`` is adjusted in place). Any other value is
+    written as given."""
     if instance is None or may_see_masked(user):
         return
     mask = MaskingClassStorage.get_masking_class(masking_model)
@@ -486,6 +499,9 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
             continue
         stored = _value_at(getattr(instance, name, None), path)
         incoming = _value_at(obj_data[name], path)
+        if not path and incoming is None and stored is not None and _is_choice_column(instance, name):
+            del obj_data[name]
+            continue
         if incoming is _ABSENT:
             if path and isinstance(obj_data[name], dict) and stored is not _ABSENT:
                 _set_at(obj_data[name], path, copy.deepcopy(stored))
