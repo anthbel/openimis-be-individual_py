@@ -74,7 +74,7 @@ class Individual(HistoryModel):
                 )
             ))
             if cls._location_scoped(user):
-                queryset = queryset.exclude(cls._deleted_without_location())
+                queryset = queryset.filter(~cls._deleted_without_location("id"))
             return queryset
 
         return queryset
@@ -86,12 +86,15 @@ class Individual(HistoryModel):
 
         return isinstance(user._u, InteractiveUser) and not user._u.is_superuser
 
-    @staticmethod
-    def _deleted_without_location():
-        """``Q`` on the soft-deleted persons with no location of their own and no household with a location: no
-        location places them in a location-scoped user's rows."""
-        in_located_household = GroupIndividual.objects.filter(group__location__isnull=False).values("individual_id")
-        return Q(is_deleted=True, location__isnull=True) & ~Q(id__in=in_located_household)
+    @classmethod
+    def _deleted_without_location(cls, person):
+        """``Exists`` on the person the outer field ``person`` holds being soft-deleted with no location of their own
+        and no household with a location: no location places them in a location-scoped user's rows. Negated, it
+        plans as an anti-join."""
+        in_located_household = GroupIndividual.objects.filter(individual_id=OuterRef("id"),
+                                                              group__location__isnull=False)
+        return Exists(cls.objects.filter(id=OuterRef(person), is_deleted=True, location__isnull=True)
+                      .filter(~Exists(in_located_household)))
 
 
 class IndividualDataSourceUpload(HistoryModel):
@@ -364,5 +367,4 @@ class GroupIndividual(HistoryModel):
             return queryset
         if not Individual._location_scoped(user):
             return queryset
-        hidden = Individual.objects.filter(Individual._deleted_without_location()).values("id")
-        return queryset.exclude(individual_id__in=hidden)
+        return queryset.filter(~Individual._deleted_without_location("individual_id"))

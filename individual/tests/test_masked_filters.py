@@ -1,5 +1,6 @@
 import datetime
 import json
+import re
 
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -150,11 +151,13 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                 after = ', after: "%s"' % page["pageInfo"]["endCursor"]
         self.assertEqual(sorted(seen), sorted(str(uuid) for uuid in expected))
         self.assertEqual(len(seen), len(set(seen)))
+        # A page is a statement whose own (outermost) clause is LIMIT; a subquery's LIMIT sits inside parentheses.
         paged = [query["sql"] for query in queries.captured_queries
-                 if 'FROM "individual_individual"' in query["sql"] and "LIMIT" in query["sql"]]
+                 if 'FROM "individual_individual"' in query["sql"]
+                 and re.search(r"LIMIT \d+(?: OFFSET \d+)?$", query["sql"])]
         self.assertTrue(paged)
         for sql in paged:
-            self.assertIn('ORDER BY "individual_individual"."UUID" ASC LIMIT', sql)
+            self.assertRegex(sql, r'ORDER BY "individual_individual"\."UUID" ASC LIMIT \d+(?: OFFSET \d+)?$')
 
     def test_an_ordering_by_unmasked_fields_ends_with_the_primary_key(self):
         with CaptureQueriesContext(connection) as queries:
