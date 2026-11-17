@@ -1,14 +1,18 @@
 """A membership whose person ``Individual.get_queryset`` hides from a reader is not listed to that reader, on the
 membership list, under a group and in the membership history. Same-district readers, administrators and live
 persons are unchanged."""
+import csv
+import io
 import json
 
 from django.core.cache import caches
 from django.test import override_settings
 
+from core.models import ExportableQueryModel
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user, create_test_interactive_user
 from individual.models import Group, GroupIndividual, Individual
+from individual.schema import Query
 from individual.services import IndividualService
 from location.models import Location
 
@@ -60,11 +64,24 @@ class MemberVisibilityTest(openIMISGraphQLTestCase):
         return set(GroupIndividual.get_queryset(None, user).values_list("individual__last_name", flat=True))
 
     def gql(self, user, query):
-        token = BaseTestContext(user=user).get_jwt()
-        response = self.query(query, headers={"HTTP_AUTHORIZATION": f"Bearer {token}"})
-        content = json.loads(response.content)
+        content = self.gql_content(user, query)
         self.assertNotIn("errors", content)
         return content["data"]
+
+    def gql_content(self, user, query):
+        token = BaseTestContext(user=user).get_jwt()
+        return json.loads(self.query(query, headers={"HTTP_AUTHORIZATION": f"Bearer {token}"}).content)
+
+    def exported(self, user, export, field, arguments=""):
+        """The values of ``field`` in the file ``export`` writes for ``user``."""
+        data = self.gql(user, '{ %s(%sfields: ["%s"], fieldsColumns: "{\\"%s\\": \\"value\\"}") }'
+                        % (export, arguments, field, Query._adjust_notation(field)))
+        file = ExportableQueryModel.objects.get(name=data[export])
+        file.content.open("rb")
+        return {row["value"] for row in csv.DictReader(io.StringIO(file.content.read().decode()))}
+
+    def exported_members(self, user, group):
+        return self.exported(user, "groupIndividualExport", "individual.lastName", 'group_Id: "%s", ' % group.id)
 
     def listed(self, user, group):
         direct = self.gql(user, '{ groupIndividual(group_Id: "%s") { edges { node { individual { lastName } } } } }'
@@ -108,3 +125,38 @@ class MemberVisibilityTest(openIMISGraphQLTestCase):
         self.assertTrue(result["success"], result)
         membership = GroupIndividual.objects.get(individual_id=person.id)
         self.assertFalse(membership.is_deleted)
+
+    def test_the_membership_export_lists_what_the_membership_list_lists_to_the_same_reader(self):
+        self.member(self.located_group, "Mvihousehold", GroupIndividual.Role.SON)
+        for user, group in ((self.near_reader, self.located_group), (self.near_reader, self.unlocated_group),
+                            (self.far_reader, self.unlocated_group), (self.admin, self.located_group),
+                            (self.admin, self.unlocated_group)):
+            with self.subTest(user=user.username, group=group.code):
+                self.assertEqual(self.exported_members(user, group), self.listed(user, group)[0])
+        self.assertEqual(self.exported_members(self.near_reader, self.located_group), {"Mvivillage", "Mvihousehold"})
+        self.assertEqual(self.exported_members(self.admin, self.unlocated_group), {"Mvilive", "Mviretired"})
+
+    def test_a_reader_of_another_district_exports_no_membership_of_a_household_of_that_district(self):
+        self.member(self.located_group, "Mvihousehold", GroupIndividual.Role.SON)
+        self.assertEqual(self.listed(self.far_reader, self.located_group), (set(), set()))
+        content = self.gql_content(
+            self.far_reader, '{ groupIndividualExport(group_Id: "%s", fields: ["individual.lastName"], '
+                             'fieldsColumns: "{}") }' % self.located_group.id)
+        self.assertFalse((content.get("data") or {}).get("groupIndividualExport"))
+        self.assertFalse(ExportableQueryModel.objects.filter(user=self.far_reader).exists())
+
+    def test_the_membership_export_leaves_out_the_hidden_person(self):
+        for user in (self.far_reader, self.near_reader):
+            with self.subTest(user=user.username):
+                self.assertEqual(self.exported_members(user, self.unlocated_group), {"Mvilive"})
+
+    def test_the_person_and_household_exports_leave_out_what_the_reader_may_not_see(self):
+        self.member(self.located_group, "Mvihousehold", GroupIndividual.Role.SON)
+        self.assertEqual(self.exported(self.far_reader, "individualExport", "lastName"), {"Mvilive"})
+        self.assertEqual(self.exported(self.near_reader, "individualExport", "lastName"), {"Mvilive", "Mvihousehold"})
+        self.assertEqual(self.exported(self.near_reader, "individualExport", "lastName", "isDeleted: true, "),
+                         {"Mvivillage"})
+        self.assertEqual(self.exported(self.admin, "individualExport", "lastName", "isDeleted: true, "),
+                         {"Mviretired", "Mvivillage"})
+        self.assertEqual(self.exported(self.far_reader, "groupExport", "code"), {"MVI-G0"})
+        self.assertEqual(self.exported(self.near_reader, "groupExport", "code"), {"MVI-G0", "MVI-G1"})
