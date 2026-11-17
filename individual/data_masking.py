@@ -77,8 +77,16 @@ class RegisteredFieldsMask(DataMaskAbs):
 
 
 class IndividualMask(RegisteredFieldsMask):
+    """The person mask. A masked column masks the ``json_ext`` key of the same name too: the upload workflows
+    write the whole upload row, the person's columns included, into the person's ``json_ext``."""
+
     masking_model = 'Individual'
     _sources = {}
+
+    @property
+    def anon_fields(self):
+        fields = super().anon_fields
+        return list(dict.fromkeys(fields + [JSON_PREFIX + field for field in fields if "." not in field]))
 
     @property
     def own_enabled(self):
@@ -371,7 +379,8 @@ def _mask_at(mask, value, path):
 def export_column_mask(model, lookup):
     """A function masking the values of the export column ``lookup`` from ``model`` as the mask registered for
     the model it reaches masks them, or None when the column reads no masked field. A column of a masked field
-    or under a masked path is masked whole; a ``json_ext`` column or path holding masked paths has those masked."""
+    or under a masked path is masked whole; a ``json_ext`` column or path holding masked paths has those masked.
+    A column that names no field (an annotation, a misspelt path) may read anything, so it is masked whole."""
     parts = lookup.split("__")
     for index, part in enumerate(parts):
         mask = MaskingClassStorage.get_masking_class(model.__name__)
@@ -396,7 +405,7 @@ def export_column_mask(model, lookup):
         try:
             field = model._meta.get_field(part)
         except FieldDoesNotExist:
-            return None
+            return RegisteredFieldsMask().anonymize
         if not field.is_relation:
             return None
         model = field.related_model

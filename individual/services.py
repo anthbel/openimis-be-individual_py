@@ -18,7 +18,8 @@ from django.apps import apps
 # from django.utils.translation import gettext as _
 from django.db.models import Q, OuterRef, Subquery, Count
 from individual.apps import IndividualConfig
-from individual.data_masking import check_masked_values_sent_back, masked_row_fields_holding_the_mask
+from individual.data_masking import check_filter_lookups, check_masked_values_sent_back, custom_filter_lookups, \
+    masked_row_fields_holding_the_mask
 from individual.models import (
     Individual,
     IndividualDataSource,
@@ -102,6 +103,7 @@ class IndividualService(BaseService, UpdateCheckerLogicServiceMixin, DeleteCheck
 
     @register_service_signal('individual_service.select_individuals_to_benefit_plan')
     def select_individuals_to_benefit_plan(self, custom_filters, benefit_plan_id, status, user):
+        check_filter_lookups(user, Individual, custom_filter_lookups(custom_filters))
         individual_query = Individual.objects.filter(is_deleted=False)
         subquery = GroupIndividual.objects.filter(
             individual=OuterRef('pk')
@@ -350,6 +352,7 @@ class GroupService(
 
     @register_service_signal('group_service.select_groups_to_benefit_plan')
     def select_groups_to_benefit_plan(self, custom_filters, benefit_plan_id, status, user):
+        check_filter_lookups(user, Group, custom_filter_lookups(custom_filters))
         group_query = Group.objects.filter(is_deleted=False)
         # criteria will be based on head of the group
         group_query_with_filters = CustomFilterWizardStorage.build_custom_filters_queryset(

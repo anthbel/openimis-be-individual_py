@@ -54,7 +54,8 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
     def test_the_person_masks_add_the_registered_fields_to_their_own(self):
         self.register()
         for mask in (IndividualMask(), IndividualHistoryMask()):
-            self.assertEqual(mask.anon_fields, [*IndividualConfig.individual_mask_fields, *person_fields()])
+            self.assertEqual(mask.anon_fields, [*IndividualConfig.individual_mask_fields, *person_fields(),
+                                                "json_ext.first_name", "json_ext.dob"])
             self.assertTrue(mask.masking_enabled)
 
     def test_the_registered_fields_are_read_when_the_mask_is_applied(self):
@@ -84,8 +85,8 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
     def test_the_own_fields_follow_the_configuration_in_use(self):
         with mock.patch.object(IndividualConfig, "individual_mask_fields", ["last_name"]), \
                 mock.patch.object(IndividualConfig, "individual_masking_enabled", True):
-            self.assertEqual(IndividualMask().anon_fields, ["last_name"])
-            self.assertEqual(IndividualHistoryMask().anon_fields, ["last_name"])
+            self.assertEqual(IndividualMask().anon_fields, ["last_name", "json_ext.last_name"])
+            self.assertEqual(IndividualHistoryMask().anon_fields, ["last_name", "json_ext.last_name"])
             with mock.patch.object(IndividualConfig, "individual_masking_enabled", False):
                 self.assertEqual(IndividualMask().anon_fields, [])
                 self.assertFalse(IndividualMask().masking_enabled)
@@ -93,7 +94,7 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
     def test_the_registered_fields_are_masked_when_individual_masking_is_disabled(self):
         self.register()
         with mock.patch.object(IndividualConfig, "individual_masking_enabled", False):
-            self.assertEqual(IndividualMask().anon_fields, person_fields())
+            self.assertEqual(IndividualMask().anon_fields, [*person_fields(), "json_ext.first_name", "json_ext.dob"])
             self.assertTrue(IndividualMask().masking_enabled)
             IndividualMask.register_fields("test", None)
             self.assertFalse(IndividualMask().masking_enabled)
@@ -787,3 +788,38 @@ class MaskedMembershipSentBackTest(RegisteredFieldsTestMixin, openIMISGraphQLTes
         result = self.update(self.unmasked, role=None)
         self.assertTrue(result["success"], result)
         self.assertEqual(self.stored(), (None, "PRIMARY"))
+
+
+class UnresolvedExportColumnTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """An export column that names no field, such as an annotation, is written masked for a user without the
+    masked-data right and in clear with it."""
+
+    def setUp(self):
+        super().setUp()
+        village = create_test_village({"name": "Annotated village", "code": "MkAn"})
+        district = village.parent.parent.code
+        self.viewer = create_right_only_user("mask_an_viewer", SEARCH_PERMS, [district])
+        self.unmasked = create_right_only_user(
+            "mask_an_unmasked", SEARCH_PERMS + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
+                   location=village).save(user=self.viewer)
+        self.register(person=lambda: ["first_name"], group=lambda: [], membership=lambda: [])
+
+    def exported(self, user):
+        from functools import partial
+        from django.db.models import F
+        from individual.data_masking import mask_export_columns
+
+        queryset = Individual.objects.filter(last_name="Lovelace").annotate(head_first_name=F("first_name"))
+        export = ExportableQueryModel.create_csv_export(
+            queryset, ["last_name", "head_first_name"], user, column_names={},
+            patches=[partial(mask_export_columns, Individual, user)])
+        export.content.open("rb")
+        [row] = list(csv.DictReader(io.StringIO(export.content.read().decode())))
+        return row["last_name"], row["head_first_name"]
+
+    def test_an_annotated_column_is_written_masked_without_the_masked_data_right(self):
+        self.assertEqual(self.exported(self.viewer), ("Lovelace", MASKED))
+
+    def test_an_annotated_column_is_written_in_clear_with_the_masked_data_right(self):
+        self.assertEqual(self.exported(self.unmasked), ("Lovelace", "Ada"))

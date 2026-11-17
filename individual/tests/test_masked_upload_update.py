@@ -1,7 +1,10 @@
+import csv
 import datetime
+import io
 import json
 from unittest import mock
 
+from core.models import ExportableQueryModel
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user
 from individual.apps import IndividualConfig
@@ -74,3 +77,29 @@ class MaskedUploadUpdateTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase)
         refused = sorted(error["field_name"] for edge in content["data"]["individualDataSource"]["edges"]
                          for error in json.loads(edge["node"]["validations"])["validation_errors"])
         self.assertEqual(refused, ["first_name", "phone"])
+
+    def test_the_json_ext_copy_of_a_masked_column_is_masked_wherever_the_column_is(self):
+        process_update_individuals_workflow(self.admin.id, self.upload.id)
+        mary = Individual.objects.get(id=self.persons[2].id)
+        self.assertEqual((mary.json_ext["first_name"], mary.json_ext["last_name"]), ("Marie", "Updated"))
+        headers = {"HTTP_AUTHORIZATION": f"Bearer {BaseTestContext(user=self.viewer).get_jwt()}"}
+
+        content = json.loads(self.query('{ individual(id: "%s") { edges { node { jsonExt } } } }' % mary.id,
+                                        headers=headers).content)
+        self.assertNotIn("errors", content)
+        json_ext = json.loads(content["data"]["individual"]["edges"][0]["node"]["jsonExt"])
+        self.assertEqual((json_ext["first_name"], json_ext["last_name"]), (MASKED, "Updated"))
+
+        content = json.loads(self.query(
+            '{ individual(customFilters: ["first_name__icontains__string=Mar"]) { totalCount } }',
+            headers=headers).content)
+        self.assertIn("masked data", json.dumps(content.get("errors")))
+
+        content = json.loads(self.query(
+            '{ individualExport(id: "%s", fields: ["id", "jsonExt"], fieldsColumns: "{}") }' % mary.id,
+            headers=headers).content)
+        self.assertNotIn("errors", content)
+        export = ExportableQueryModel.objects.get(name=content["data"]["individualExport"])
+        export.content.open("rb")
+        [row] = list(csv.DictReader(io.StringIO(export.content.read().decode())))
+        self.assertEqual((row["first_name"], row["last_name"]), (MASKED, "Updated"))

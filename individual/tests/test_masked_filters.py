@@ -151,3 +151,54 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.assertNotIn("errors", content)
         self.assertTrue(any('ORDER BY "individual_individual"."last_name" ASC, "individual_individual"."UUID" ASC'
                             in query["sql"] for query in queries.captured_queries))
+
+
+ENROLL = """
+mutation ($input: %sInput!) { %s(input: $input) { internalId } }
+"""
+
+
+class MaskedEnrollmentFilterTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
+    """An enrolment selecting persons or groups by a custom filter reading a masked field is refused to a user
+    without the masked-data right and enrols no one."""
+
+    def setUp(self):
+        super().setUp()
+        from social_protection.tests.test_helpers import create_benefit_plan
+
+        village = create_test_village({"name": "Enrolment village", "code": "MkEn"})
+        district = village.parent.parent.code
+        perms = SEARCH_PERMS + ["gql_group_create_perms"]
+        self.viewer = create_right_only_user("mask_en_viewer", perms, [district])
+        self.unmasked = create_right_only_user(
+            "mask_en_unmasked", perms + ["gql_query_enable_viewing_masked_data_perms"], [district])
+        for first_name, phone, income in (("Ada", "+257 1", 120), ("Zed", "+257 9", 80)):
+            Individual(first_name=first_name, last_name="X", dob=datetime.date(1980, 1, 2), location=village,
+                       json_ext={"phone": phone}).save(user=self.viewer)
+            Group(code=f"MK-EN-{first_name}", location=village, json_ext={"income": income}).save(user=self.viewer)
+        self.person_plan = create_benefit_plan(self.viewer.username, {"code": "MKEN-I", "type": "INDIVIDUAL"})
+        self.group_plan = create_benefit_plan(self.viewer.username, {"code": "MKEN-G", "type": "GROUP"})
+        self.register()
+
+    def enroll(self, user, mutation, plan, condition):
+        token = BaseTestContext(user=user).get_jwt()
+        name = mutation[0].upper() + mutation[1:]
+        content = self.send_mutation_raw(ENROLL % (name + "Mutation", mutation), token, follow=False, variables_param={
+            "input": {"clientMutationId": f"mask-en-{mutation}-{user.username}", "customFilters": [condition],
+                      "benefitPlanId": str(plan.id), "status": "ACTIVE"}})
+        self.assertNotIn("errors", content)
+        return self._get_mutation_log_node(content["data"][mutation]["internalId"], token)
+
+    def test_an_enrolment_by_a_masked_field_is_refused_without_the_masked_data_right(self):
+        from social_protection.models import Beneficiary, GroupBeneficiary
+
+        for mutation, plan, condition, beneficiaries in (
+                ("confirmIndividualEnrollment", self.person_plan, "phone__icontains__string=+257 1", Beneficiary),
+                ("confirmGroupEnrollment", self.group_plan, "income__exact__integer=120", GroupBeneficiary)):
+            with self.subTest(mutation=mutation):
+                node = self.enroll(self.viewer, mutation, plan, condition)
+                self.assertNotEqual(node["status"], 2, node)
+                self.assertIn("masked data", node["error"])
+                self.assertFalse(beneficiaries.objects.filter(benefit_plan=plan).exists())
+                node = self.enroll(self.unmasked, mutation, plan, condition)
+                self.assertEqual(node["status"], 2, node)
