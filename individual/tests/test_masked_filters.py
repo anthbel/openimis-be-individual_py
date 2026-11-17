@@ -26,6 +26,8 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                                  location=village, json_ext={"phone": "+257 1", "sex": "F"})
         self.person.save(user=admin)
         GroupIndividual(group=self.group, individual=self.person, role=GroupIndividual.Role.HEAD).save(user=admin)
+        Individual(first_name="Zed", last_name="Byron", dob=datetime.date(1970, 5, 6), location=village,
+                   json_ext={"phone": "+257 0", "sex": "M"}).save(user=admin)
         self.upload = IndividualDataSourceUpload(source_name="filters.csv", source_type="individual import")
         self.upload.save(user=admin)
         IndividualDataSource(upload=self.upload, individual=self.person,
@@ -41,9 +43,6 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
     MASKED_FILTERS = {
         "first name": '{ individual(firstName_Icontains: "Ad") { totalCount } }',
         "dob": '{ individual(dob_Lt: "1990-01-01") { totalCount } }',
-        "order by first name": '{ individual(orderBy: ["firstName"]) { totalCount } }',
-        "order by first name descending": '{ individual(orderBy: ["-first_name"]) { totalCount } }',
-        "order by a masked key": '{ individual(orderBy: ["json_ext__phone"]) { totalCount } }',
         "custom filter": '{ individual(customFilters: ["phone__icontains__string=+257"]) { totalCount } }',
         "history": '{ individualHistory(firstName_Iexact: "Ada") { totalCount } }',
         "group member name": '{ group(firstName: "Ada") { totalCount } }',
@@ -59,6 +58,9 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                                           'groupindividuals(role: HEAD) { totalCount } } } } }',
         "nested memberships of a group": '{ group(id: "%(group)s") { edges { node { '
                                          'groupindividuals(individual_Dob_Lt: "1990-01-01") { totalCount } } } } }',
+        "upload rows nested in an upload": '{ individualDataSourceUpload(id: "%(upload)s") { edges { node { '
+                                           'individualdatasourceSet(individual_FirstName_Iexact: "Ada") '
+                                           '{ totalCount } } } } }',
         "nested upload rows": '{ individual(id: "%(person)s") { edges { node { '
                               'individualdatasourceSet(individual_FirstName_Iexact: "Ada") { totalCount } } } } }',
         "enrollment summary": '{ individualEnrollmentSummary(customFilters: ["phone__icontains__string=+257"]) '
@@ -90,10 +92,25 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
 
     def test_a_filter_on_an_unmasked_field_is_applied(self):
         for query, name in (('{ individual(lastName_Icontains: "Love") { totalCount } }', "individual"),
-                            ('{ individual(orderBy: ["-lastName"]) { totalCount } }', "individual"),
                             ('{ individual(customFilters: ["sex__iexact__string=F"]) { totalCount } }', "individual"),
                             ('{ group(lastName: "Love") { totalCount } }', "group")):
             with self.subTest(query=query):
                 content = self.gql(self.viewer, query)
                 self.assertNotIn("errors", content)
                 self.assertEqual(content["data"][name]["totalCount"], 1)
+
+    def ordered_first_names(self, user, order):
+        content = self.gql(user, '{ individual(orderBy: ["%s"]) { edges { node { lastName } } } }' % order)
+        self.assertNotIn("errors", content)
+        return [edge["node"]["lastName"] for edge in content["data"]["individual"]["edges"]]
+
+    def test_an_ordering_on_a_masked_field_is_left_out_without_the_masked_data_right(self):
+        for ascending, descending in (("firstName", "-firstName"), ("dob", "-dob"),
+                                      ("json_ext__phone", "-json_ext__phone")):
+            with self.subTest(order=ascending):
+                self.assertEqual(self.ordered_first_names(self.viewer, ascending),
+                                 self.ordered_first_names(self.viewer, descending))
+                self.assertEqual(self.ordered_first_names(self.unmasked, ascending),
+                                 list(reversed(self.ordered_first_names(self.unmasked, descending))))
+        self.assertEqual(self.ordered_first_names(self.viewer, "lastName"), ["Byron", "Lovelace"])
+        self.assertEqual(self.ordered_first_names(self.viewer, "-lastName"), ["Lovelace", "Byron"])

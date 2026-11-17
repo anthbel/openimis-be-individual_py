@@ -9,7 +9,7 @@ from core.gql_queries import UserGQLType
 from core.schema import OrderedDjangoFilterConnectionField
 from individual.apps import IndividualConfig
 from individual.data_masking import (
-    check_filter_lookups, custom_filter_lookups, filter_lookups, mask_once, masking_resolver, order_lookups,
+    check_filter_lookups, custom_filter_lookups, filter_lookups, mask_once, masking_resolver, unmasked_order_by,
 )
 from individual.models import Individual, IndividualDataSource, Group, GroupIndividual, \
     IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
@@ -32,16 +32,19 @@ class JsonExtMixin:
 
 
 class MaskedFilterMixin:
-    """A connection refusing to a user without the masked-data right its filter arguments, ``orderBy`` and
-    ``customFilters`` when they read a masked field (``check_filter_lookups``)."""
+    """A connection refusing to a user without the masked-data right its filter arguments and ``customFilters``
+    when they read a masked field (``check_filter_lookups``), and leaving out the ``orderBy`` terms ordering by
+    one (``unmasked_order_by``)."""
 
     @classmethod
     def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
+        user, model = info.context.user, filterset_class._meta.model
         lookups = filter_lookups(filterset_class, {name: value for name, value in args.items()
                                                    if name in filtering_args})
-        lookups += order_lookups(args.get("orderBy"))
         lookups += custom_filter_lookups(args.get("customFilters"))
-        check_filter_lookups(info.context.user, filterset_class._meta.model, lookups)
+        check_filter_lookups(user, model, lookups)
+        if args.get("orderBy"):
+            args = {**args, "orderBy": unmasked_order_by(user, model, args["orderBy"])}
         return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
 
 
@@ -135,6 +138,9 @@ class IndividualDataSourceUploadGQLType(ScopedQuerysetMixin, DjangoObjectType):
     uuid = graphene.String(source='uuid')
     json_ext = graphene.JSONString()
     progress = graphene.JSONString()
+    individualdatasource_set = MaskedFilterConnectionField(
+        "individual.gql_queries.IndividualDataSourceGQLType", required=True)
+    groupdatasource_set = MaskedFilterConnectionField("individual.gql_queries.GroupDataSourceGQLType", required=True)
 
     def resolve_json_ext(self, info):
         from individual.import_pipeline import public_json_ext

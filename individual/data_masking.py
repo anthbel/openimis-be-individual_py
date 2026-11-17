@@ -321,6 +321,15 @@ def order_lookups(order_by):
     return lookups
 
 
+def unmasked_order_by(user, model, order_by):
+    """``order_by`` less its terms ordering by a masked field, for a user without the masked-data right: such an
+    ordering would tell the masked values, and leaving it out keeps the list readable."""
+    if not order_by or may_see_masked(user):
+        return order_by
+    terms = [order_by] if isinstance(order_by, str) else order_by
+    return [term for term in terms if not any(reads_masked_field(model, lookup) for lookup in order_lookups([term]))]
+
+
 def custom_filter_lookups(custom_filters, relation=None):
     """The model lookups of ``customFilters`` conditions, as individual's custom filter wizards apply them."""
     from individual.custom_filters import IndividualCustomFilterWizard
