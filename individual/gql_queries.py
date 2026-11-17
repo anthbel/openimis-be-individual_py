@@ -11,7 +11,8 @@ from core.gql_queries import UserGQLType
 from core.schema import OrderedDjangoFilterConnectionField
 from individual.apps import IndividualConfig
 from individual.data_masking import (
-    check_filter_lookups, custom_filter_lookups, filter_lookups, mask_once, masked_order_by, masking_resolver,
+    check_filter_lookups, custom_filter_lookups, filter_lookups, lists_masked_reverse_relation, mask_once,
+    masked_order_by, masking_resolver,
 )
 from individual.models import Individual, IndividualDataSource, Group, GroupIndividual, \
     IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
@@ -146,6 +147,8 @@ class IndividualGQLType(MaskedFilterObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
+        if lists_masked_reverse_relation(info, Individual, "Individual"):
+            return Individual.objects.none()
         return Individual.get_queryset(queryset, info.context.user)
 
 
@@ -272,6 +275,8 @@ class GroupGQLType(MaskedFilterObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
+        if lists_masked_reverse_relation(info, Group, "Group"):
+            return Group.objects.none()
         return Group.get_queryset(queryset, info.context.user)
 
 

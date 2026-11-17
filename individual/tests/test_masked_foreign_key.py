@@ -156,6 +156,38 @@ class MaskedForeignKeyTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         mask_for_user(self.viewer, "Individual", person)
         self.assertEqual((person.location_id, person.json_ext["location_name"]), (None, MASKED))
 
+    CONTAINMENT = ('{ locations(code: "%(code)s") { edges { node { code '
+                   'individuals { edges { node { id } } } groups { edges { node { id } } } } } } }')
+
+    def listed(self, user):
+        """(persons, groups) the location lists to ``user``."""
+        content = self.gql(user, self.CONTAINMENT.replace("%(code)s", self.village.code))
+        self.assertNotIn("errors", content)
+        [node] = [edge["node"] for edge in content["data"]["locations"]["edges"]]
+        return len(node["individuals"]["edges"]), len(node["groups"]["edges"])
+
+    def test_a_location_lists_no_person_or_group_while_their_location_is_masked(self):
+        self.assertEqual(self.listed(self.viewer), (0, 0))
+        self.assertEqual(self.listed(self.unmasked), (1, 1))
+        self.register(person=lambda: [], group=lambda: [], membership=lambda: [])
+        self.assertEqual(self.listed(self.viewer), (1, 1))
+
+    def test_a_location_masked_on_persons_only_masks_their_household_location(self):
+        self.register(person=lambda: ["location"], group=lambda: [], membership=lambda: [])
+        query = ('{ group(id: "%(group)s") { edges { node { location { code } } } } '
+                 'individual(id: "%(person)s") { edges { node { groupindividuals { edges { node { '
+                 'group { location { code } } } } } } } } }')
+        for user, code in ((self.viewer, None), (self.unmasked, self.village.code)):
+            content = self.gql(user, query)
+            self.assertNotIn("errors", content)
+            [group] = [edge["node"] for edge in content["data"]["group"]["edges"]]
+            [person] = [edge["node"] for edge in content["data"]["individual"]["edges"]]
+            [membership] = [edge["node"] for edge in person["groupindividuals"]["edges"]]
+            self.assertEqual((group["location"] and group["location"]["code"],
+                              membership["group"]["location"] and membership["group"]["location"]["code"]),
+                             (code, code), user.username)
+        self.assertEqual(self.listed(self.viewer), (0, 0))
+
     def test_a_location_filter_is_refused_while_the_location_is_masked(self):
         for name in ("individual", "group"):
             query = '{ %s(parentLocation: "%%(village)s", parentLocationLevel: 3) { totalCount } }' % name

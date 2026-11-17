@@ -26,8 +26,8 @@ JSON_PREFIX = "json_ext."
 MEMBERSHIP_COLUMNS = ("role", "recipient_type")
 # json_ext keys holding a copy of a column: the location name and code of an upload row, which the upload
 # workflows write into the unit's json_ext, and the location string a person update writes.
-COLUMN_COPY_KEYS = {
-    column: ("location_name", "location_code", "location_str") for column in ("location", "location_id")}
+LOCATION_COLUMNS = ("location", "location_id")
+COLUMN_COPY_KEYS = {column: ("location_name", "location_code", "location_str") for column in LOCATION_COLUMNS}
 # Upload row keys holding a membership column: a person row's, and those of each entry of a group row's
 # ``individuals_data``.
 PERSON_ROW_MEMBERSHIP_KEYS = {"role": "individual_role", "recipient_type": "recipient_info"}
@@ -116,13 +116,16 @@ class IndividualHistoryMask(IndividualMask):
 
 
 def head_copy_fields(person_fields):
-    """The group json_ext paths holding a copy of the masked person fields ``person_fields``: the head's
-    json_ext keys copied onto the group, and the member names when a name column is masked."""
+    """The group fields holding a copy of the masked person fields ``person_fields``: the head's json_ext keys
+    copied onto the group, the member names when a name column is masked, and the group's location, which its
+    members take, when the person location is masked."""
     not_copied = set(IndividualConfig.group_json_ext_keys_not_copied_from_head or ())
     paths = [field for field in person_fields
              if field.startswith(JSON_PREFIX) and field[len(JSON_PREFIX):].split(".")[0] not in not_copied]
     if any(field in NAME_COLUMNS for field in person_fields):
         paths += [JSON_PREFIX + key for key in GROUP_NAME_KEYS]
+    if any(field in LOCATION_COLUMNS for field in person_fields):
+        paths.append("location")
     return paths
 
 
@@ -649,6 +652,26 @@ def check_masked_values_sent_back(user, masking_model, instance, obj_data):
     if refused:
         raise ValidationError(
             f"masked value sent back for {', '.join(refused)}: send a new value or leave the field out")
+
+
+def lists_masked_reverse_relation(info, model, masking_model):
+    """Whether the list being resolved is, for a user of the request without the masked-data right, the reverse
+    relation of a foreign key of ``model`` that the mask registered for ``masking_model`` masks
+    (``locations { individuals }`` while ``location`` is masked): its rows would tell the masked value."""
+    from graphene.utils.str_converters import to_snake_case
+
+    if context_may_see_masked(info):
+        return False
+    mask = MaskingClassStorage.get_masking_class(masking_model)
+    if mask is None or not mask.masking_enabled:
+        return False
+    parent = getattr(getattr(getattr(info.parent_type, "graphene_type", None), "_meta", None), "model", None)
+    accessor = to_snake_case(info.field_name)
+    for column in foreign_key_columns(model, mask.anon_fields):
+        foreign_key = model._meta.get_field(column)
+        if foreign_key.related_model is parent and foreign_key.remote_field.get_accessor_name() == accessor:
+            return True
+    return False
 
 
 def keep_masked_foreign_keys_given_null(fields, instance, obj_data):
