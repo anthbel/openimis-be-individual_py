@@ -7,6 +7,7 @@ import graphene_django_optimizer as gql_optimizer
 import pandas as pd
 
 from django.contrib.auth.models import AnonymousUser
+from django.core.exceptions import PermissionDenied
 from django.db.models import Q, OuterRef, Subquery
 
 from core.custom_filters import CustomFilterWizardStorage
@@ -67,6 +68,20 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
         patches = super().get_patches_for_field(field_type) or []
         return [partial(mask_export_columns, getattr(cls, field_type).model, _EXPORTING_USER.get()), *patches]
 
+    # The columns of an export that follow a relation, by exported field: those the frontends request.
+    export_relation_columns = {}
+
+    @classmethod
+    def check_export_columns(cls, field_name, model, fields):
+        """Refuses an export whose ``fields`` name a column other than ``model``'s own columns, its ``json_ext``
+        keys and the ``export_relation_columns`` of ``field_name``: a column following any other relation reads
+        rows outside the reader's scope."""
+        allowed = {name for field in model._meta.concrete_fields for name in (field.name, field.attname)}
+        allowed.update(cls.export_relation_columns.get(field_name, ()))
+        for column in (cls._adjust_notation(field) for field in fields):
+            if column not in allowed and not column.startswith("json_ext__"):
+                raise PermissionDenied(f"the export column {column} is not exportable")
+
     @classmethod
     def create_export_function(cls, field_name):
         resolver_name = f"resolve_{field_name}_export"
@@ -77,6 +92,7 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
 
         def exporter(root, info, **kwargs):
             field = getattr(cls, field_name)
+            cls.check_export_columns(field_name, field.model, kwargs.get("fields") or [])
             filters = {name: value for name, value in kwargs.items() if name in field.filtering_args}
             custom_filters, relation = kwargs.get("customFilters"), cls.get_related_field()
             check_filter_lookups(info.context.user, field.model, filter_lookups(field.filterset_class, filters)
@@ -105,6 +121,9 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         ]
     }
     exportable_fields = ['group', 'individual', 'group_individual']
+    export_relation_columns = {
+        'group_individual': ('individual__id', 'individual__first_name', 'individual__last_name', 'individual__dob'),
+    }
     module_name = "individual"
     object_type = "Individual"
     object_type_group = "Group"

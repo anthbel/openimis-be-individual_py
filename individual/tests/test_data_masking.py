@@ -293,15 +293,14 @@ class MaskedExportTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                 self.assertNotIn(clear, {cell for values in cells.values() for cell in values})
                 self.assertEqual(self.exported_cells(self.unmasked, query, ["id", field], args)[column], {clear})
 
-    def test_a_json_column_reached_through_a_relation_is_written_with_its_masked_keys_masked(self):
+    def test_a_json_column_reached_through_a_relation_is_refused(self):
         args = f'group_Id: "{self.group.id}",'
-        [cell] = self.exported_cells(self.viewer, "groupIndividualExport", ["id", "group.jsonExt"], args)[
-            "group__json_ext"]
-        self.assertIn(f"'income': '{MASKED}'", cell)
-        self.assertIn("'roof': 'tin'", cell)
-        [cell] = self.exported_cells(self.unmasked, "groupIndividualExport", ["id", "group.jsonExt"], args)[
-            "group__json_ext"]
-        self.assertIn("'income': 120", cell)
+        for user in (self.viewer, self.unmasked):
+            with self.subTest(user=user.username):
+                exports = ExportableQueryModel.objects.count()
+                content = self.export(user, "groupIndividualExport", ["id", "group.jsonExt"], args)
+                self.assertIn("the export column group__json_ext is not exportable", json.dumps(content["errors"]))
+                self.assertEqual(ExportableQueryModel.objects.count(), exports)
 
     def test_the_unmasked_keys_of_a_masked_json_column_and_the_unmasked_columns_are_written_in_clear(self):
         cells = self.exported_cells(self.viewer, "individualExport", ["id", "lastName", "jsonExt"])
