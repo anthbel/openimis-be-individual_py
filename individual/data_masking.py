@@ -26,6 +26,8 @@ JSON_PREFIX = "json_ext."
 MEMBERSHIP_COLUMNS = ("role", "recipient_type")
 # json_ext keys holding a copy of a column: the location name and code of an upload row, which the upload
 # workflows write into the unit's json_ext, and the location string a person update writes.
+# The json_ext key where a duplicate merge journals the kept and retired persons' differing values, any field's.
+MERGE_CONFLICTS_PATH = "json_ext.merge_conflicts"
 LOCATION_COLUMNS = ("location", "location_id")
 COLUMN_COPY_KEYS = {column: ("location_name", "location_code", "location_str") for column in LOCATION_COLUMNS}
 # Upload row keys holding a membership column: a person row's, and those of each entry of a group row's
@@ -93,7 +95,8 @@ class RegisteredFieldsMask(DataMaskAbs):
 
 class IndividualMask(RegisteredFieldsMask):
     """The person mask. A masked column masks the ``json_ext`` key of the same name too: the upload workflows
-    write the whole upload row, the person's columns included, into the person's ``json_ext``."""
+    write the whole upload row, the person's columns included, into the person's ``json_ext``. While it masks
+    any field, it masks the merge journal (``MERGE_CONFLICTS_PATH``) whole, which may hold that field's values."""
 
     masking_model = 'Individual'
     _sources = {}
@@ -101,7 +104,8 @@ class IndividualMask(RegisteredFieldsMask):
     @property
     def anon_fields(self):
         fields = super().anon_fields
-        return list(dict.fromkeys(fields + [JSON_PREFIX + field for field in fields if "." not in field]))
+        fields = list(dict.fromkeys(fields + [JSON_PREFIX + field for field in fields if "." not in field]))
+        return list(dict.fromkeys(fields + [MERGE_CONFLICTS_PATH])) if fields else fields
 
     @property
     def own_enabled(self):

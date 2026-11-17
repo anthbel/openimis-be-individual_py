@@ -55,7 +55,7 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
         self.register()
         for mask in (IndividualMask(), IndividualHistoryMask()):
             self.assertEqual(mask.anon_fields, [*IndividualConfig.individual_mask_fields, *person_fields(),
-                                                "json_ext.first_name", "json_ext.dob"])
+                                                "json_ext.first_name", "json_ext.dob", "json_ext.merge_conflicts"])
             self.assertTrue(mask.masking_enabled)
 
     def test_the_registered_fields_are_read_when_the_mask_is_applied(self):
@@ -68,7 +68,8 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
         self.register()
         IndividualMask.register_fields("test", None)
         GroupMask.register_fields("test", None)
-        self.assertEqual(IndividualMask().anon_fields, list(IndividualConfig.individual_mask_fields))
+        self.assertEqual(IndividualMask().anon_fields,
+                         [*IndividualConfig.individual_mask_fields, "json_ext.merge_conflicts"])
         self.assertNotIn("code", GroupMask().anon_fields)
 
     def test_the_group_masks_take_the_registered_fields_and_the_copy_of_the_masked_head_fields(self):
@@ -85,8 +86,9 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
     def test_the_own_fields_follow_the_configuration_in_use(self):
         with mock.patch.object(IndividualConfig, "individual_mask_fields", ["last_name"]), \
                 mock.patch.object(IndividualConfig, "individual_masking_enabled", True):
-            self.assertEqual(IndividualMask().anon_fields, ["last_name", "json_ext.last_name"])
-            self.assertEqual(IndividualHistoryMask().anon_fields, ["last_name", "json_ext.last_name"])
+            own = ["last_name", "json_ext.last_name", "json_ext.merge_conflicts"]
+            self.assertEqual(IndividualMask().anon_fields, own)
+            self.assertEqual(IndividualHistoryMask().anon_fields, own)
             with mock.patch.object(IndividualConfig, "individual_masking_enabled", False):
                 self.assertEqual(IndividualMask().anon_fields, [])
                 self.assertFalse(IndividualMask().masking_enabled)
@@ -94,7 +96,8 @@ class MaskFieldsTest(RegisteredFieldsTestMixin, TestCase):
     def test_the_registered_fields_are_masked_when_individual_masking_is_disabled(self):
         self.register()
         with mock.patch.object(IndividualConfig, "individual_masking_enabled", False):
-            self.assertEqual(IndividualMask().anon_fields, [*person_fields(), "json_ext.first_name", "json_ext.dob"])
+            self.assertEqual(IndividualMask().anon_fields,
+                             [*person_fields(), "json_ext.first_name", "json_ext.dob", "json_ext.merge_conflicts"])
             self.assertTrue(IndividualMask().masking_enabled)
             IndividualMask.register_fields("test", None)
             self.assertFalse(IndividualMask().masking_enabled)
