@@ -130,6 +130,32 @@ class MaskedForeignKeyTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                 self.assertEqual(self.exported_cells(self.viewer, query, "location.code"), {MASKED})
                 self.assertEqual(self.exported_cells(self.unmasked, query, "location.code"), {self.village.code})
 
+    def test_the_location_column_name_reads_and_orders_as_the_masked_location(self):
+        self.assertEqual(self.exported_cells(self.viewer, "individualExport", "locationId"), {MASKED})
+        self.assertEqual(self.exported_cells(self.unmasked, "individualExport", "locationId"), {str(self.village.id)})
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        for user, ordered in ((self.viewer, False), (self.unmasked, True)):
+            with CaptureQueriesContext(connection) as queries:
+                content = self.gql(user, '{ individual(orderBy: ["locationId"]) { edges { node { id } } } }')
+            self.assertNotIn("errors", content)
+            orders = [query["sql"].split("ORDER BY", 1)[1] for query in queries.captured_queries
+                      if 'FROM "individual_individual"' in query["sql"] and "ORDER BY" in query["sql"]]
+            self.assertTrue(orders)
+            self.assertEqual(any("location_id" in order for order in orders), ordered, orders)
+
+    def test_a_location_masked_by_its_column_name_is_masked_as_by_its_name(self):
+        self.register(person=lambda: ["location_id"], group=lambda: ["location_id"], membership=lambda: [])
+        codes = self.location_codes(self.viewer)
+        self.assertTrue(codes)
+        self.assertEqual(codes, [None] * len(codes))
+        for query in ("individualExport", "groupExport"):
+            self.assertEqual(self.exported_cells(self.viewer, query, "location.code"), {MASKED})
+        person = Individual.objects.get(id=self.person.id)
+        mask_for_user(self.viewer, "Individual", person)
+        self.assertEqual((person.location_id, person.json_ext["location_name"]), (None, MASKED))
+
     def test_a_location_filter_is_refused_while_the_location_is_masked(self):
         for name in ("individual", "group"):
             query = '{ %s(parentLocation: "%%(village)s", parentLocationLevel: 3) { totalCount } }' % name

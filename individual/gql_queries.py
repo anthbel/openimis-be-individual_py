@@ -34,31 +34,6 @@ class JsonExtMixin:
         return None
 
 
-class MaskedFilterMixin:
-    """A connection refusing to a user without the masked-data right its filter arguments and ``customFilters``
-    when they read a masked field (``check_filter_lookups``), and leaving out the ``orderBy`` terms ordering by
-    one (``unmasked_order_by``)."""
-
-    @classmethod
-    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
-        user, model = info.context.user, filterset_class._meta.model
-        lookups = filter_lookups(filterset_class, {name: value for name, value in args.items()
-                                                   if name in filtering_args})
-        lookups += custom_filter_lookups(args.get("customFilters"))
-        check_filter_lookups(user, model, lookups)
-        if args.get("orderBy"):
-            args = {**args, "orderBy": unmasked_order_by(user, model, args["orderBy"])}
-        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
-
-
-class MaskedOrderedFilterConnectionField(MaskedFilterMixin, OrderedDjangoFilterConnectionField):
-    pass
-
-
-class MaskedFilterConnectionField(MaskedFilterMixin, DjangoFilterConnectionField):
-    pass
-
-
 class UnmaskedOrderConnectionField(OrderedDjangoFilterConnectionField):
     """Core's ordered connection leaving out, for a user without the masked-data right, the ``orderBy`` terms
     whose path traverses a JSON field (``unmasked_json_order_by``: JSON fields hold copies of masked values) or
@@ -106,6 +81,31 @@ class MaskedFilterObjectType(DjangoObjectType):
     @classmethod
     def __init_subclass_with_meta__(cls, _meta=None, **options):
         super().__init_subclass_with_meta__(_meta=_meta or MaskedFilterTypeOptions(cls), **options)
+
+
+class MaskedFilterMixin:
+    """A connection refusing to a user without the masked-data right its filter arguments and ``customFilters``
+    when they read a masked field (``check_filter_lookups``), and leaving out the ``orderBy`` terms ordering by
+    one (``unmasked_order_by``)."""
+
+    @classmethod
+    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
+        user, model = info.context.user, filterset_class._meta.model
+        lookups = filter_lookups(filterset_class, {name: value for name, value in args.items()
+                                                   if name in filtering_args})
+        lookups += custom_filter_lookups(args.get("customFilters"))
+        check_filter_lookups(user, model, lookups)
+        if args.get("orderBy"):
+            args = {**args, "orderBy": unmasked_order_by(user, model, args["orderBy"])}
+        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
+
+
+class MaskedOrderedFilterConnectionField(MaskedFilterMixin, OrderedDjangoFilterConnectionField):
+    pass
+
+
+class MaskedFilterConnectionField(MaskedFilterMixin, DjangoFilterConnectionField):
+    pass
 
 
 def _masked_dob(root, info, masking_model):

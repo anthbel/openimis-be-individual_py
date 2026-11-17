@@ -26,7 +26,8 @@ JSON_PREFIX = "json_ext."
 MEMBERSHIP_COLUMNS = ("role", "recipient_type")
 # json_ext keys holding a copy of a column: the location name and code of an upload row, which the upload
 # workflows write into the unit's json_ext, and the location string a person update writes.
-COLUMN_COPY_KEYS = {"location": ("location_name", "location_code", "location_str")}
+COLUMN_COPY_KEYS = {
+    column: ("location_name", "location_code", "location_str") for column in ("location", "location_id")}
 # Upload row keys holding a membership column: a person row's, and those of each entry of a group row's
 # ``individuals_data``.
 PERSON_ROW_MEMBERSHIP_KEYS = {"role": "individual_role", "recipient_type": "recipient_info"}
@@ -168,7 +169,28 @@ def column_copy_paths(fields):
 def _foreign_key(obj, name):
     """The many-to-one or one-to-one field of ``obj``'s model named ``name`` or with the column name ``name``,
     or None."""
-    meta = getattr(type(obj), "_meta", None)
+    return _model_foreign_key(type(obj), name)
+
+
+def foreign_key_columns(model, fields):
+    """The name and column name (``location``, ``location_id``) of each foreign key of ``model`` that ``fields``
+    name by either."""
+    columns = set()
+    for field in fields:
+        foreign_key = _model_foreign_key(model, field)
+        if foreign_key is not None:
+            columns |= {foreign_key.name, foreign_key.attname}
+    return columns
+
+
+def _masked_columns(model, fields):
+    """The columns of ``model`` that ``fields`` mask, a foreign key under its name and its column name."""
+    return {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)} | \
+        foreign_key_columns(model, fields)
+
+
+def _model_foreign_key(model, name):
+    meta = getattr(model, "_meta", None)
     if meta is None:
         return None
     try:
@@ -316,7 +338,7 @@ def reads_masked_field(model, lookup):
             if not path:
                 return bool(masked)
             return any(path == key or path.startswith(f"{key}.") or key.startswith(f"{path}.") for key in masked)
-        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+        if part in _masked_columns(model, fields):
             return True
         try:
             field = model._meta.get_field(part)
@@ -432,7 +454,7 @@ def export_column_mask(model, lookup):
                 return value
 
             return mask_inner
-        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+        if part in _masked_columns(model, fields):
             return mask.anonymize
         try:
             field = model._meta.get_field(part)
