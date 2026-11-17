@@ -12,7 +12,6 @@ from graphene.types.resolver import dict_or_attr_resolver
 from core.apps import CoreConfig
 from core.data_masking import DataMaskAbs, MaskingClassStorage
 from individual.apps import IndividualConfig
-from tasks_management.data_masking import traverses_json_field
 
 logger = logging.getLogger(__name__)
 
@@ -351,14 +350,33 @@ def unmasked_order_by(user, model, order_by):
     return kept
 
 
+def _crosses_undescribed_json(model, lookup):
+    """Whether ``lookup`` from ``model`` traverses, through its relations, a JSON field no mask describes (any
+    JSON field but the ``json_ext`` of a model with a registered mask), or a name that is no field."""
+    for part in lookup.split("__"):
+        if model is None:
+            return True
+        try:
+            field = model._meta.get_field(part)
+        except FieldDoesNotExist:
+            return True
+        if isinstance(field, JSONField):
+            return part != "json_ext" or MaskingClassStorage.get_masking_class(model.__name__) is None
+        if not field.is_relation:
+            return False
+        model = field.related_model
+    return False
+
+
 def reveals_masked_values(model, lookup, aliases=None):
-    """Whether ordering ``model`` by ``lookup`` would tell masked values: its path reads a masked field
-    (``reads_masked_field``) or traverses a JSON field, which holds copies of masked values, or a name that is
-    no field (``traverses_json_field``), through any relation. ``aliases`` maps an annotation of the queryset to
-    the lookup, or the tuple of lookups, it is computed from; an empty tuple reads no stored field."""
+    """Whether ordering ``model`` by ``lookup`` would tell masked values: its path reads a masked field, a
+    masked ``json_ext`` key of a masked model included (``reads_masked_field``), or traverses a JSON field no
+    mask describes, which may hold copies of masked values, or a name that is no field, through any relation.
+    ``aliases`` maps an annotation of the queryset to the lookup, or the tuple of lookups, it is computed from;
+    an empty tuple reads no stored field."""
     alias = (aliases or {}).get(lookup, lookup)
     lookups = (alias,) if isinstance(alias, str) else tuple(alias)
-    return any(reads_masked_field(model, path) or traverses_json_field(model, path) for path in lookups)
+    return any(reads_masked_field(model, path) or _crosses_undescribed_json(model, path) for path in lookups)
 
 
 def masked_order_by(user, model, order_by, aliases=None):
