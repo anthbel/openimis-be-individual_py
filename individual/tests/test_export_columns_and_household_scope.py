@@ -206,7 +206,7 @@ class ExportAndHouseholdScopeTest(openIMISGraphQLTestCase):
         self.assertEqual({row["last_name"] for row in rows}, {"Ehunloc", "Ehqind", "Ehkboth"})
         _content, rows = self.export(self.far, "groupIndividualExport", ["individual__last_name"],
                                      f'group_Id: "{self.g0.id}", ')
-        self.assertEqual({row["individual__last_name"] for row in rows}, {"Ehunloc"})
+        self.assertEqual(rows, [])
 
     def test_a_member_of_a_household_without_a_location_stays_visible_through_their_own_location(self):
         self.assertIn("Ehxlocd", self.visible(self.near))
@@ -218,9 +218,9 @@ class ExportAndHouseholdScopeTest(openIMISGraphQLTestCase):
         for user in (self.far, self.near):
             with self.subTest(user=user.username):
                 self.assertIn("Ehunloc", self.visible(user))
-                members = self.data(user, '{ groupIndividual(group_Id: "%s") { edges { node { individual '
-                                          '{ lastName } } } } }' % self.g0.id)
-                self.assertIn("Ehunloc", self.names(members))
+        members = self.data(self.near, '{ groupIndividual(group_Id: "%s") { edges { node { individual '
+                                       '{ lastName } } } } }' % self.g0.id)
+        self.assertIn("Ehunloc", self.names(members))
 
     def test_the_rows_of_each_reader(self):
         self.assertEqual(sorted(self.visible(self.far)), ["Ehkboth", "Ehqind", "Ehunloc"])

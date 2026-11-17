@@ -55,7 +55,22 @@ Saving a group that has a location gives that location to its live members (memb
 
 With `ROW_SECURITY` on, an interactive user who is not a superuser sees the persons in their locations, the persons whose household is in their locations, and the persons without a location, except a soft-deleted person with no location and no household with a location: that one only a superuser sees. A household without a location places none of its members in a user's locations: its member located elsewhere is seen only by the users of that location. A person belonging to several households of the user's locations is listed once. The `individual` and `individualHistory` queries, and every path reading `Individual.get_queryset`, follow this rule.
 The memberships (`groupIndividual`, a group's `groupindividuals`, `groupIndividualHistory`, `groupIndividualExport`) follow it too: a membership whose person that rule hides from the user is not listed to them (in a household without a location, the memberships of its members located outside the user's locations), and `groupIndividualExport` writes the memberships `groupIndividual` lists to the same user, scoped by the group's location as that query is. `individualExport` follows it through the `individual` query.
-Such a user sees the groups in their locations and the groups without a location, except a group without a location one of whose live members has a location outside the user's locations: its `head` and `jsonExt` (which holds the head's and members' names) would show that member. The `group` and `groupHistory` queries, `groupExport`, and every path reading `Group.get_queryset` (social_protection's group beneficiaries, social_registry's entries) follow this rule. Within a group the user sees, a group's `head`, its `jsonExt` and `groupExport` still show a member the person rule above hides (a soft-deleted person without a location).
+Such a user sees the groups in their locations and the groups without a location, except a group without a location one of whose live members has a location outside the user's locations: its `head` and `jsonExt` (which holds the head's and members' names) would show that member. The rule is `Group.visible_q(user, prefix)`; `Group.get_queryset` applies it, and every queryset of a model pointing at a household narrows it through one of the two:
+
+| Model (foreign key to `Group`) | Narrowed by |
+|---|---|
+| individual `GroupIndividual` (`group`), and its history | `Group.visible_q(user, "group")`; the history through `Group.get_queryset` |
+| individual `GroupDataSource` (`group`) | `ParentScope("group")`, which reads `Group.get_queryset` |
+| social_protection `GroupBeneficiary` (`group`) | `Group.get_queryset` |
+| targeting `Assessment` (`group`) | `Group.get_queryset` |
+| targeting `RunError`, `SimulationRow` (`group`) | `ParentScope("group")` |
+| registry_handoff `HandoffItem`, `PendingRevision`, `Feedback` (`group`) | `ParentScope("group")` |
+| registry_intake `IntakeItem`, `Link`, `IntakeFeedback` (`local_group`) | `ParentScope("local_group", allow_null=True)` |
+| social_registry `RegistryEntry`, `ChangeRequest`, `Consent` (`group`) | `ParentScope("group")` |
+| social_registry `Submission` (`base_group`, `result_group`) | `Group.get_queryset`, or the submission's own location |
+| community_validation `Item` (`group`) | the item's own `location` (`LocationScope`), not the household |
+
+The `group` and `groupHistory` queries and `groupExport` follow it through `Group.get_queryset`. Within a group the user sees, a group's `head`, its `jsonExt` and `groupExport` still show a member the person rule above hides (a soft-deleted person without a location).
 
 An enrolment (`confirmIndividualEnrollment`, `confirmGroupEnrollment`, through `select_individuals_to_benefit_plan` and `select_groups_to_benefit_plan`) selects only the persons and groups the user may see, as the `individual` and `group` queries scope them by the user's locations; `individualEnrollmentSummary` and `groupEnrollmentSummary` count within the same scope, so the preview matches the enrolment.
 

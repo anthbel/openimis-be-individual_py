@@ -4,6 +4,7 @@ from django.apps import apps
 from django.conf import settings
 from django.db import models, transaction
 from django.db.models import Exists, OuterRef, Q
+from django.db.models.lookups import IsNull
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils.translation import gettext_lazy as _
@@ -244,23 +245,36 @@ class Group(HistoryModel):
             return queryset.filter(id=-1)
 
         if not user.is_imis_admin:
-            in_user_locations = LocationManager().build_user_location_filter_query(
-                user._u,
-                loc_types=LocationConfig.location_types,
-            )
-            if Individual._location_scoped(user):
-                return queryset.filter(
-                    Q(location__isnull=False) & in_user_locations
-                    | Q(location__isnull=True) & ~Exists(cls._member_located_elsewhere(user))
-                )
-            return queryset.filter(in_user_locations)
+            return queryset.filter(cls.visible_q(user))
         return queryset
 
+    @classmethod
+    def visible_q(cls, user, prefix=""):
+        """``Q`` on the households reached through ``prefix`` (the queryset's own rows when empty) a user who is
+        not an administrator may see: those in their locations and those without a location, except, for a
+        location-scoped user, a household without a location one of whose live members has a location outside
+        theirs - its head and ``jsonExt`` would show that member. Every queryset narrowing households by location
+        goes through this ``Q``."""
+        location = f"{prefix}__location" if prefix else "location"
+        visible = LocationManager().build_user_location_filter_query(
+            user._u,
+            prefix=location,
+            loc_types=LocationConfig.location_types,
+        )
+        if Individual._location_scoped(user):
+            household = f"{prefix}_id" if prefix else "id"
+            visible = visible & Q(**{f"{location}__isnull": False}) | Q(**{f"{location}__isnull": True}) & ~Exists(
+                cls._member_located_elsewhere(user, household, location))
+        return visible
+
     @staticmethod
-    def _member_located_elsewhere(user):
-        """Live memberships of the household the outer ``id`` holds whose person has a location outside
-        ``user``'s locations: an unlocated household with such a member would show that member."""
-        return GroupIndividual.objects.filter(group_id=OuterRef("id"), is_deleted=False).exclude(
+    def _member_located_elsewhere(user, household, location):
+        """Live memberships of the household the outer field ``household`` holds, while the outer ``location`` is
+        null, whose person has a location outside ``user``'s locations. The condition on the outer location keeps
+        the check on the row being read: a located household never reaches memberships."""
+        return GroupIndividual.objects.filter(
+            IsNull(OuterRef(location), True), group_id=OuterRef(household), is_deleted=False,
+        ).exclude(
             LocationManager().build_user_location_filter_query(
                 user._u,
                 prefix="individual__location",
@@ -380,14 +394,7 @@ class GroupIndividual(HistoryModel):
             return queryset.filter(id=-1)
 
         if not user.is_imis_admin:
-            queryset = queryset.filter(
-                LocationManager().build_user_location_filter_query(
-                    user._u,
-                    prefix='group__location',
-                    loc_types=LocationConfig.location_types,
-                )
-            )
-            return cls.without_hidden_persons(queryset, user)
+            return cls.without_hidden_persons(queryset.filter(Group.visible_q(user, prefix="group")), user)
         return queryset
 
     @classmethod

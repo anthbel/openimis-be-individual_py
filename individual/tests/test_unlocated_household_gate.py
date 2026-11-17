@@ -102,6 +102,29 @@ class UnlocatedHouseholdGateTest(openIMISGraphQLTestCase):
         self.assertEqual({row["id"] for row in rows}, {str(self.g3.id), str(self.g2.id)})
         self.assertNotIn("Ughxlocd", json.dumps(rows))
 
+    def test_no_membership_of_the_hidden_household_reaches_the_reader(self):
+        head = GroupIndividual.objects.get(group=self.g0, individual__last_name="Ughunloc")
+        queries = {
+            "memberships": '{ groupIndividual(group_Id: "%s") { edges { node { group { code jsonExt } } } } }'
+                           % self.g0.id,
+            "membership node": '{ node(id: "%s") { ... on GroupIndividualGQLType { group { code jsonExt } } } }'
+                               % to_global_id("GroupIndividualGQLType", head.id),
+            "person memberships": '{ individual { edges { node { lastName groupindividuals { edges { node '
+                                  '{ group { code jsonExt } } } } } } } }',
+            "membership history": '{ groupIndividualHistory { edges { node { group { code jsonExt } } } } }',
+        }
+        for case, query in queries.items():
+            with self.subTest(case=case):
+                text = json.dumps(self.gql(self.far, query))
+                self.assertNotIn("UGH-G0", text)
+                self.assertNotIn("Ughxlocd", text)
+        self.assertFalse(GroupIndividual.get_queryset(None, self.far).filter(group=self.g0).exists())
+        for user in (self.near, self.admin):
+            with self.subTest(user=user.username):
+                self.assertEqual(GroupIndividual.get_queryset(None, user).filter(group=self.g0).count(), 2)
+                text = json.dumps(self.gql(user, queries["memberships"]))
+                self.assertIn("Ughxlocd", text)
+
     def test_the_readers_of_every_member_location_and_administrators_still_see_it(self):
         self.assertEqual(self.codes(self.near), {"UGH-G0", "UGH-G3"})
         self.assertEqual(self.codes(self.admin), {"UGH-G0", "UGH-G3", "UGH-G2"})
