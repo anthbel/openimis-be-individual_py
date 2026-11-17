@@ -12,7 +12,7 @@ from core.schema import OrderedDjangoFilterConnectionField
 from core.services import wait_for_mutation
 from core.utils import append_validity_filter, is_valid_uuid
 from individual.apps import IndividualConfig
-from individual.data_masking import check_export_columns
+from individual.data_masking import check_export_columns, check_filter_lookups, custom_filter_lookups, filter_lookups
 from individual.gql_mutations import CreateIndividualMutation, UpdateIndividualMutation, DeleteIndividualMutation, \
     CreateGroupMutation, UpdateGroupMutation, DeleteGroupMutation, CreateGroupIndividualMutation, \
     UpdateGroupIndividualMutation, DeleteGroupIndividualMutation, \
@@ -23,7 +23,7 @@ from individual.gql_queries import IndividualGQLType, IndividualHistoryGQLType, 
     IndividualDataSourceUploadGQLType, GroupHistoryGQLType, \
     IndividualSummaryEnrollmentGQLType, IndividualDataUploadQGLType, \
     GroupIndividualHistoryGQLType, GlobalSchemaType, \
-    GroupSummaryEnrollmentGQLType, GroupDataSourceGQLType
+    GroupSummaryEnrollmentGQLType, GroupDataSourceGQLType, MaskedOrderedFilterConnectionField
 from individual.models import Individual, IndividualDataSource, Group, \
     GroupIndividual, IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from location.apps import LocationConfig
@@ -49,7 +49,8 @@ def patch_details(data_df: pd.DataFrame):
 
 
 class MaskedExportQueryMixin(ExportableQueryMixin):
-    """Core's exports, refusing the columns that read a masked field to a user without the masked-data right."""
+    """Core's exports, refusing to a user without the masked-data right the columns, filters and custom filters
+    that read a masked field."""
 
     @classmethod
     def create_export_function(cls, field_name):
@@ -58,7 +59,13 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
         core_exporter = getattr(cls, resolver_name)
 
         def exporter(root, info, **kwargs):
-            check_export_columns(info.context.user, getattr(cls, field_name).model,
+            field = getattr(cls, field_name)
+            filters = {name: value for name, value in kwargs.items() if name in field.filtering_args}
+            custom_filters, relation = kwargs.get("customFilters"), cls.get_related_field()
+            check_filter_lookups(info.context.user, field.model, filter_lookups(field.filterset_class, filters)
+                                 + custom_filter_lookups(custom_filters)
+                                 + (custom_filter_lookups(custom_filters, relation) if relation else []))
+            check_export_columns(info.context.user, field.model,
                                  [cls._adjust_notation(column) for column in kwargs.get("fields") or []])
             return core_exporter(root, info, **kwargs)
 
@@ -83,7 +90,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
     object_type_group = "Group"
     related_field_individual = "groupindividuals__individual"
 
-    individual = OrderedDjangoFilterConnectionField(
+    individual = MaskedOrderedFilterConnectionField(
         IndividualGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -97,7 +104,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         parent_location_level=graphene.Int(),
     )
 
-    individual_history = OrderedDjangoFilterConnectionField(
+    individual_history = MaskedOrderedFilterConnectionField(
         IndividualHistoryGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -105,14 +112,14 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         groupId=graphene.String()
     )
 
-    individual_data_source = OrderedDjangoFilterConnectionField(
+    individual_data_source = MaskedOrderedFilterConnectionField(
         IndividualDataSourceGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
         client_mutation_id=graphene.String()
     )
 
-    group_data_source = OrderedDjangoFilterConnectionField(
+    group_data_source = MaskedOrderedFilterConnectionField(
         GroupDataSourceGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -126,7 +133,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         client_mutation_id=graphene.String()
     )
 
-    group = OrderedDjangoFilterConnectionField(
+    group = MaskedOrderedFilterConnectionField(
         GroupGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
@@ -141,7 +148,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         parent_location_level=graphene.Int(),
     )
 
-    group_history = OrderedDjangoFilterConnectionField(
+    group_history = MaskedOrderedFilterConnectionField(
         GroupHistoryGQLType,
         json_ext_head__icontains=graphene.String(),
         orderBy=graphene.List(of_type=graphene.String),
@@ -149,7 +156,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         client_mutation_id=graphene.String()
     )
 
-    group_individual = OrderedDjangoFilterConnectionField(
+    group_individual = MaskedOrderedFilterConnectionField(
         GroupIndividualGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
@@ -158,7 +165,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         client_mutation_id=graphene.String()
     )
 
-    group_individual_history = OrderedDjangoFilterConnectionField(
+    group_individual_history = MaskedOrderedFilterConnectionField(
         GroupIndividualHistoryGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -256,6 +263,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         ).values('individual')
         query = Individual.objects.filter(is_deleted=False)
         custom_filters = kwargs.get("customFilters", None)
+        check_filter_lookups(info.context.user, Individual, custom_filter_lookups(custom_filters))
         benefit_plan_id = kwargs.get("benefitPlanId", None)
         if custom_filters:
             query = CustomFilterWizardStorage.build_custom_filters_queryset(
@@ -354,10 +362,13 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
         first_name = kwargs.get("first_name", None)
+        last_name = kwargs.get("last_name", None)
+        check_filter_lookups(info.context.user, Group, [
+            lookup for value, lookup in ((first_name, "groupindividuals__individual__first_name"),
+                                         (last_name, "groupindividuals__individual__last_name")) if value])
         if first_name:
             filters.append(Q(groupindividuals__individual__first_name__icontains=first_name))
 
-        last_name = kwargs.get("last_name", None)
         if last_name:
             filters.append(Q(groupindividuals__individual__last_name__icontains=last_name))
 
@@ -399,6 +410,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
 
         json_ext_head_icontains = kwargs.get("json_ext_head__icontains")
         if json_ext_head_icontains:
+            check_filter_lookups(info.context.user, Group.history.model, ["json_ext__head__icontains"])
             filters.append(Q(json_ext__head__icontains=json_ext_head_icontains))
 
         Query._check_permissions(info.context.user,
@@ -453,6 +465,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
                                  IndividualConfig.gql_group_search_perms)
         query = Group.objects.filter(is_deleted=False)
         custom_filters = kwargs.get("customFilters", None)
+        check_filter_lookups(info.context.user, Group, custom_filter_lookups(custom_filters))
         benefit_plan_id = kwargs.get("benefitPlanId", None)
         if custom_filters:
             query = CustomFilterWizardStorage.build_custom_filters_queryset(

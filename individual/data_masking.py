@@ -3,6 +3,8 @@ import datetime
 from decimal import Decimal
 
 from django.core.exceptions import FieldDoesNotExist, PermissionDenied, ValidationError
+from django.db.models import JSONField
+from django.db.models.fields.json import KeyTransform
 from graphene.types.resolver import dict_or_attr_resolver
 
 from core.apps import CoreConfig
@@ -249,6 +251,14 @@ def masking_resolver(masking_model):
     return resolve
 
 
+def _json_path(parts):
+    """The json_ext path the lookup parts after ``json_ext`` read; a trailing lookup name (icontains, lt, ...)
+    is not a key."""
+    if parts and (JSONField.get_lookups().get(parts[-1]) or KeyTransform.get_lookups().get(parts[-1])):
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
 def reads_masked_field(model, lookup):
     """Whether the ``__`` lookup ``lookup`` from ``model`` reads a field the mask registered for a model it
     reaches masks; a whole ``json_ext`` is masked while any of its paths is."""
@@ -257,7 +267,7 @@ def reads_masked_field(model, lookup):
         mask = MaskingClassStorage.get_masking_class(model.__name__)
         fields = mask.anon_fields if mask is not None and mask.masking_enabled else []
         if part == "json_ext" and fields:
-            path = ".".join(parts[index + 1:])
+            path = _json_path(parts[index + 1:])
             masked = [field[len(JSON_PREFIX):] for field in fields if field.startswith(JSON_PREFIX)]
             if not path:
                 return bool(masked)
@@ -272,6 +282,54 @@ def reads_masked_field(model, lookup):
             return False
         model = field.related_model
     return False
+
+
+def check_filter_lookups(user, model, lookups):
+    """Refuses to a user without the masked-data right a filter or an ordering on ``model`` by a lookup reading
+    a masked field, naming the lookup: its results would tell the masked values."""
+    if may_see_masked(user):
+        return
+    for lookup in lookups:
+        if lookup and reads_masked_field(model, lookup):
+            raise PermissionDenied(f"filtering or ordering on {lookup} needs the right to view masked data")
+
+
+_EMPTY_FILTER_VALUES = ([], (), {}, "", None)
+
+
+def filter_lookups(filterset_class, args):
+    """The model lookups of the filter arguments set in ``args``, as ``filterset_class`` applies them."""
+    filters = filterset_class.base_filters
+    return [filters[name].field_name for name, value in args.items()
+            if name in filters and value not in _EMPTY_FILTER_VALUES]
+
+
+def order_lookups(order_by):
+    """The model lookups of an ``orderBy`` argument, as core's ordered connection applies it."""
+    from graphene.utils.str_converters import to_snake_case
+    from core.schema import OrderedDjangoFilterConnectionField
+
+    if not order_by:
+        return []
+    lookups = []
+    for order in [order_by] if isinstance(order_by, str) else order_by:
+        if order == "?":
+            continue
+        cleaned = to_snake_case(OrderedDjangoFilterConnectionField._filter_order_by(order) or "")
+        lookups += [part.lstrip("-+") for part in cleaned.split(",")]
+    return lookups
+
+
+def custom_filter_lookups(custom_filters, relation=None):
+    """The model lookups of ``customFilters`` conditions, as individual's custom filter wizards apply them."""
+    from individual.custom_filters import IndividualCustomFilterWizard
+
+    lookups = []
+    for condition in custom_filters or []:
+        field_and_filter, _, _ = IndividualCustomFilterWizard.parse_condition(condition)
+        lookup = f"json_ext__{field_and_filter}"
+        lookups.append(f"{relation}__{lookup}" if relation else lookup)
+    return lookups
 
 
 def check_export_columns(user, model, lookups):
