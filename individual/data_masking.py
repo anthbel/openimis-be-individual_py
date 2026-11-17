@@ -1,5 +1,6 @@
 import copy
 import datetime
+import math
 from decimal import Decimal
 
 from django.core.exceptions import FieldDoesNotExist, PermissionDenied, ValidationError
@@ -332,14 +333,70 @@ def custom_filter_lookups(custom_filters, relation=None):
     return lookups
 
 
-def check_export_columns(user, model, lookups):
-    """Refuses an export column reading a masked field to a user without the masked-data right: an export
-    reads the stored values, which no mask reaches."""
-    if may_see_masked(user):
-        return
-    for lookup in lookups:
-        if reads_masked_field(model, lookup):
-            raise PermissionDenied(f"the column {lookup} needs the right to view masked data")
+def _mask_at(mask, value, path):
+    """``value`` with the value at the ``.`` path ``path`` masked by ``mask``, through objects and each item of
+    lists; a copy."""
+    if not path:
+        return mask.anonymize(value)
+    if isinstance(value, list):
+        return [_mask_at(mask, item, path) for item in value]
+    if isinstance(value, dict):
+        key, _, rest = path.partition(".")
+        return {name: _mask_at(mask, item, rest) if name == key else copy.deepcopy(item)
+                for name, item in value.items()}
+    return value
+
+
+def export_column_mask(model, lookup):
+    """A function masking the values of the export column ``lookup`` from ``model`` as the mask registered for
+    the model it reaches masks them, or None when the column reads no masked field. A column of a masked field
+    or under a masked path is masked whole; a ``json_ext`` column or path holding masked paths has those masked."""
+    parts = lookup.split("__")
+    for index, part in enumerate(parts):
+        mask = MaskingClassStorage.get_masking_class(model.__name__)
+        fields = mask.anon_fields if mask is not None and mask.masking_enabled else []
+        if part == "json_ext" and fields:
+            path = ".".join(parts[index + 1:])
+            masked = [field[len(JSON_PREFIX):] for field in fields if field.startswith(JSON_PREFIX)]
+            if path and any(path == key or path.startswith(f"{key}.") for key in masked):
+                return mask.anonymize
+            inner = [key[len(path) + 1:] if path else key for key in masked if not path or key.startswith(f"{path}.")]
+            if not inner:
+                return None
+
+            def mask_inner(value, mask=mask, inner=inner):
+                for key in inner:
+                    value = _mask_at(mask, value, key)
+                return value
+
+            return mask_inner
+        if part in {field.split(".")[0] for field in fields if not field.startswith(JSON_PREFIX)}:
+            return mask.anonymize
+        try:
+            field = model._meta.get_field(part)
+        except FieldDoesNotExist:
+            return None
+        if not field.is_relation:
+            return None
+        model = field.related_model
+    return None
+
+
+def _is_null(value):
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
+def mask_export_columns(model, user, data_frame):
+    """``data_frame``, an export table with one column per lookup from ``model``, with the values of the columns
+    reading a masked field masked, unless ``user`` may see masked data. An export reads the stored values, which
+    no other mask reaches; without a user the columns are masked."""
+    if user is not None and may_see_masked(user):
+        return data_frame
+    for column in data_frame.columns:
+        masker = export_column_mask(model, column)
+        if masker is not None:
+            data_frame[column] = data_frame[column].map(lambda value: value if _is_null(value) else masker(value))
+    return data_frame
 
 
 def _value_at(value, path):

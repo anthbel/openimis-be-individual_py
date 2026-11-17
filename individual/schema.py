@@ -1,4 +1,7 @@
+import contextvars
 import json
+from functools import partial
+
 import graphene
 import graphene_django_optimizer as gql_optimizer
 import pandas as pd
@@ -12,7 +15,7 @@ from core.schema import OrderedDjangoFilterConnectionField
 from core.services import wait_for_mutation
 from core.utils import append_validity_filter, is_valid_uuid
 from individual.apps import IndividualConfig
-from individual.data_masking import check_export_columns, check_filter_lookups, custom_filter_lookups, filter_lookups
+from individual.data_masking import check_filter_lookups, custom_filter_lookups, filter_lookups, mask_export_columns
 from individual.gql_mutations import CreateIndividualMutation, UpdateIndividualMutation, DeleteIndividualMutation, \
     CreateGroupMutation, UpdateGroupMutation, DeleteGroupMutation, CreateGroupIndividualMutation, \
     UpdateGroupIndividualMutation, DeleteGroupIndividualMutation, \
@@ -48,9 +51,17 @@ def patch_details(data_df: pd.DataFrame):
     return data_df
 
 
+_EXPORTING_USER = contextvars.ContextVar("individual_exporting_user", default=None)
+
+
 class MaskedExportQueryMixin(ExportableQueryMixin):
-    """Core's exports, refusing to a user without the masked-data right the columns, filters and custom filters
-    that read a masked field."""
+    """Core's exports, refusing to a user without the masked-data right the filters and custom filters that read
+    a masked field, and writing the columns that read one masked (``mask_export_columns``, the first patch)."""
+
+    @classmethod
+    def get_patches_for_field(cls, field_type):
+        patches = super().get_patches_for_field(field_type) or []
+        return [partial(mask_export_columns, getattr(cls, field_type).model, _EXPORTING_USER.get()), *patches]
 
     @classmethod
     def create_export_function(cls, field_name):
@@ -65,9 +76,11 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
             check_filter_lookups(info.context.user, field.model, filter_lookups(field.filterset_class, filters)
                                  + custom_filter_lookups(custom_filters)
                                  + (custom_filter_lookups(custom_filters, relation) if relation else []))
-            check_export_columns(info.context.user, field.model,
-                                 [cls._adjust_notation(column) for column in kwargs.get("fields") or []])
-            return core_exporter(root, info, **kwargs)
+            token = _EXPORTING_USER.set(info.context.user)
+            try:
+                return core_exporter(root, info, **kwargs)
+            finally:
+                _EXPORTING_USER.reset(token)
 
         setattr(cls, resolver_name, staticmethod(exporter))
 

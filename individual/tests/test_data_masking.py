@@ -1,5 +1,7 @@
 import copy
+import csv
 import datetime
+import io
 import json
 from unittest import mock
 
@@ -8,6 +10,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
+from core.models import ExportableQueryModel
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user
 from individual.apps import IndividualConfig
@@ -230,7 +233,8 @@ EXPORT = '{ %s(%s fields: [%s], fieldsColumns: "{}") }'
 
 
 class MaskedExportTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
-    """An export column reading a field the person or group mask masks needs the masked-data right."""
+    """An export column reading a field the person, group or membership mask masks is written masked for a user
+    without the masked-data right, and in clear with it."""
 
     def setUp(self):
         super().setUp()
@@ -243,7 +247,7 @@ class MaskedExportTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.group = Group(code="MK-E1", location=village, json_ext={"income": 120, "roof": "tin"})
         self.group.save(user=admin)
         person = Individual(first_name="Ada", last_name="Lovelace", dob=datetime.date(1980, 1, 2),
-                            location=village, json_ext={"phone": "+257 1"})
+                            location=village, json_ext={"phone": "+257 1", "sex": "F"})
         person.save(user=admin)
         GroupIndividual(group=self.group, individual=person, role=GroupIndividual.Role.HEAD).save(user=admin)
         self.tokens = {user.username: BaseTestContext(user=user).get_jwt() for user in (self.viewer, self.unmasked)}
@@ -254,23 +258,62 @@ class MaskedExportTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
                               headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[user.username]}"})
         return json.loads(response.content)
 
-    def test_a_masked_column_is_refused_without_the_masked_data_right(self):
-        group_arg = f'group_Id: "{self.group.id}",'
-        for query, column, args in (("individualExport", "firstName", ""), ("individualExport", "dob", ""),
-                                    ("individualExport", "jsonExt", ""), ("individualExport", "jsonExt.phone", ""),
-                                    ("groupExport", "code", ""), ("groupExport", "jsonExt", ""),
-                                    ("groupExport", "jsonExt.head", ""),
-                                    ("groupIndividualExport", "individual.firstName", group_arg),
-                                    ("groupIndividualExport", "group.jsonExt", group_arg)):
-            with self.subTest(query=query, column=column):
-                self.assertIn("errors", self.export(self.viewer, query, ["id", column], args))
-                self.assertNotIn("errors", self.export(self.unmasked, query, ["id", column], args))
+    def exported_cells(self, user, query, fields, args=""):
+        """The cells of the file the export writes, by column."""
+        content = self.export(user, query, fields, args)
+        self.assertNotIn("errors", content)
+        export = ExportableQueryModel.objects.get(name=content["data"][query])
+        export.content.open("rb")
+        rows = list(csv.DictReader(io.StringIO(export.content.read().decode())))
+        self.assertTrue(rows)
+        return {column: {row[column] for row in rows} for column in rows[0]}
 
-    def test_an_unmasked_column_is_exported(self):
-        for query, column in (("individualExport", "lastName"), ("individualExport", "jsonExt.sex"),
-                              ("groupExport", "jsonExt.roof")):
-            with self.subTest(query=query, column=column):
-                self.assertNotIn("errors", self.export(self.viewer, query, ["id", column]))
+    MASKED_COLUMNS = (
+        ("individualExport", "firstName", "", "first_name", "Ada"),
+        ("individualExport", "dob", "", "dob", "1980-01-02"),
+        ("individualExport", "jsonExt", "", "phone", "+257 1"),
+        ("individualExport", "jsonExt.phone", "", "json_ext__phone", "+257 1"),
+        ("groupExport", "code", "", "code", "MK-E1"),
+        ("groupExport", "jsonExt", "", "income", "120"),
+        ("groupExport", "jsonExt.head", "", "json_ext__head", "Ada Lovelace"),
+        ("groupIndividualExport", "role", "group_Id", "role", "HEAD"),
+        ("groupIndividualExport", "individual.firstName", "group_Id", "individual__first_name", "Ada"),
+    )
+
+    def test_a_masked_column_is_written_masked_without_the_masked_data_right(self):
+        for query, field, arg, column, clear in self.MASKED_COLUMNS:
+            args = f'{arg}: "{self.group.id}",' if arg else ""
+            with self.subTest(query=query, field=field):
+                cells = self.exported_cells(self.viewer, query, ["id", field], args)
+                self.assertEqual(cells[column], {MASKED})
+                self.assertNotIn(clear, {cell for values in cells.values() for cell in values})
+                self.assertEqual(self.exported_cells(self.unmasked, query, ["id", field], args)[column], {clear})
+
+    def test_a_json_column_reached_through_a_relation_is_written_with_its_masked_keys_masked(self):
+        args = f'group_Id: "{self.group.id}",'
+        [cell] = self.exported_cells(self.viewer, "groupIndividualExport", ["id", "group.jsonExt"], args)[
+            "group__json_ext"]
+        self.assertIn(f"'income': '{MASKED}'", cell)
+        self.assertIn("'roof': 'tin'", cell)
+        [cell] = self.exported_cells(self.unmasked, "groupIndividualExport", ["id", "group.jsonExt"], args)[
+            "group__json_ext"]
+        self.assertIn("'income': 120", cell)
+
+    def test_the_unmasked_keys_of_a_masked_json_column_and_the_unmasked_columns_are_written_in_clear(self):
+        cells = self.exported_cells(self.viewer, "individualExport", ["id", "lastName", "jsonExt"])
+        self.assertEqual((cells["last_name"], cells["sex"], cells["phone"]), ({"Lovelace"}, {"F"}, {MASKED}))
+        cells = self.exported_cells(self.viewer, "groupExport", ["id", "jsonExt.roof"])
+        self.assertEqual(cells["json_ext__roof"], {"tin"})
+
+    def test_a_failing_source_writes_no_file(self):
+        def failing():
+            raise RuntimeError("source unavailable")
+
+        self.register(person=failing)
+        exports = ExportableQueryModel.objects.count()
+        content = self.export(self.viewer, "individualExport", ["id", "lastName"])
+        self.assertIn("errors", content)
+        self.assertEqual(ExportableQueryModel.objects.count(), exports)
 
 
 DATA_SOURCE_QUERY = """
