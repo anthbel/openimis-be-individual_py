@@ -99,6 +99,28 @@ class HistoricalTaskMask(TaskMask):
     masking_model = "HistoricalTask"
 
 
+def check_task_masks(app_configs=None, **kwargs):
+    """System check: an error for each of Task and HistoricalTask holding more than one registered mask class.
+    Core applies only the mask registered last for a model, so a second class would replace these task masks;
+    another module masks its tasks through ``TaskMask.register_source``."""
+    from django.core.checks import Error
+    from core.data_masking import MaskingClassRegistryPoint
+
+    classes = {}
+    for entry in MaskingClassRegistryPoint.REGISTERED_MASKING_CLASS:
+        if entry["model"] in (TaskMask.masking_model, HistoricalTaskMask.masking_model):
+            mask_class = type(entry["class_reference"])
+            classes.setdefault(entry["model"], {})[f"{mask_class.__module__}.{mask_class.__qualname__}"] = None
+    return [
+        Error(
+            f"{len(names)} mask classes are registered for {model}: {', '.join(names)}",
+            hint="Register a task masker with individual.task_masking.TaskMask.register_source instead.",
+            id="individual.E001",
+        )
+        for model, names in classes.items() if len(names) > 1
+    ]
+
+
 def person_name(user, individual):
     """The person's name as ``user`` may see it, each masked name column showing the mask."""
     masked = [] if user is not None and may_see_masked(user) else _masked_names()

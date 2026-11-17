@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 from django.apps import AppConfig
+from django.core import checks
 from django.core.signals import request_started
 from django.db.models import Q
 
@@ -293,8 +294,9 @@ class IndividualConfig(AppConfig):
                                 GroupIndividualMask(), GroupIndividualHistoryMask(),
                                 IndividualUploadRowMask(), GroupUploadRowMask()]
         )
-        from individual.task_masking import HistoricalTaskMask, TaskMask
+        from individual.task_masking import HistoricalTaskMask, TaskMask, check_task_masks
         MaskingClassRegistryPoint.register_masking_class(masking_class_list=[TaskMask(), HistoricalTaskMask()])
+        checks.register(check_task_masks)
 
     def _set_up_workflows(self):
         from workflow.systems.python import PythonWorkflowAdaptor
