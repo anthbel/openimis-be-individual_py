@@ -11,7 +11,6 @@ from django.db.models import Q, OuterRef, Subquery
 
 from core.custom_filters import CustomFilterWizardStorage
 from core.gql.export_mixin import ExportableQueryMixin
-from core.schema import OrderedDjangoFilterConnectionField
 from core.services import wait_for_mutation
 from core.utils import append_validity_filter, is_valid_uuid
 from individual.apps import IndividualConfig
@@ -27,6 +26,7 @@ from individual.gql_queries import IndividualGQLType, IndividualHistoryGQLType, 
     IndividualSummaryEnrollmentGQLType, IndividualDataUploadQGLType, \
     GroupIndividualHistoryGQLType, GlobalSchemaType, \
     GroupSummaryEnrollmentGQLType, GroupDataSourceGQLType, MaskedOrderedFilterConnectionField
+from individual.gql_queries import UnmaskedOrderConnectionField
 from individual.models import Individual, IndividualDataSource, Group, \
     GroupIndividual, IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from location.apps import LocationConfig
@@ -146,7 +146,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         client_mutation_id=graphene.String()
     )
 
-    individual_data_source_upload = OrderedDjangoFilterConnectionField(
+    individual_data_source_upload = UnmaskedOrderConnectionField(
         IndividualDataSourceUploadGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -197,7 +197,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         benefitPlanId=graphene.String()
     )
 
-    individual_data_upload_history = OrderedDjangoFilterConnectionField(
+    individual_data_upload_history = UnmaskedOrderConnectionField(
         IndividualDataUploadQGLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
