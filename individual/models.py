@@ -346,11 +346,23 @@ class GroupIndividual(HistoryModel):
             return queryset.filter(id=-1)
 
         if not user.is_imis_admin:
-            return queryset.filter(
+            queryset = queryset.filter(
                 LocationManager().build_user_location_filter_query(
                     user._u,
                     prefix='group__location',
                     loc_types=LocationConfig.location_types,
                 )
             )
+            return cls.without_hidden_persons(queryset, user)
         return queryset
+
+    @classmethod
+    def without_hidden_persons(cls, queryset, user):
+        """``queryset`` of rows pointing at a person (``individual``) minus those whose person
+        ``Individual.get_queryset`` hides from ``user``."""
+        if not settings.ROW_SECURITY or user.is_anonymous or user.is_imis_admin:
+            return queryset
+        if not Individual._location_scoped(user):
+            return queryset
+        hidden = Individual.objects.filter(Individual._deleted_without_location()).values("id")
+        return queryset.exclude(individual_id__in=hidden)

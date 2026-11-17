@@ -54,6 +54,7 @@ It is dedicated to be deployed as a module of [openimis-be_py](https://github.co
 Saving a group that has a location gives that location to its live members (memberships not deleted); a former member keeps their own.
 
 With `ROW_SECURITY` on, an interactive user who is not a superuser sees the persons in their locations, the persons whose household is in their locations, and the persons without a location, except a soft-deleted person with no location and no household with a location: that one only a superuser sees. The `individual` and `individualHistory` queries, and every path reading `Individual.get_queryset`, follow this rule.
+The memberships (`groupIndividual`, a group's `groupindividuals`, `groupIndividualHistory`) follow it too: a membership whose person that rule hides from the user is not listed to them.
 
 An enrolment (`confirmIndividualEnrollment`, `confirmGroupEnrollment`, through `select_individuals_to_benefit_plan` and `select_groups_to_benefit_plan`) selects only the persons and groups the user may see, as the `individual` and `group` queries scope them by the user's locations; `individualEnrollmentSummary` and `groupEnrollmentSummary` count within the same scope, so the preview matches the enrolment.
 
