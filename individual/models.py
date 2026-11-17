@@ -222,7 +222,9 @@ class Group(HistoryModel):
 def update_member_individuals_location(sender, instance, **kwargs):
     with transaction.atomic():
         # has to save one-by-one instead of bulk update due to track history
-        for individual in Individual.objects.filter(groupindividuals__group=instance):
+        # Only live members follow the household; a former member lives elsewhere.
+        for individual in Individual.objects.filter(groupindividuals__group=instance,
+                                                    groupindividuals__is_deleted=False):
             # only update individual location if group location is present,
             # because individuals import would create a group with empty locaiton which then takes on the location of the head
             if instance.location_id and individual.location_id != instance.location_id:

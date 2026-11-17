@@ -51,6 +51,8 @@ It is dedicated to be deployed as a module of [openimis-be_py](https://github.co
   - update
   - delete
 
+Saving a group that has a location gives that location to its live members (memberships not deleted); a former member keeps their own.
+
 ## Configuration options (can be changed via core.ModuleConfiguration)
 * gql_individual_search_perms: required rights to call individual GraphQL Query (default: ["159001"])
 * gql_individual_create_perms: required rights to call createIndividual GraphQL Mutation (default: ["159002"])
