@@ -306,6 +306,23 @@ class MaskedExportTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         cells = self.exported_cells(self.viewer, "groupExport", ["id", "jsonExt.roof"])
         self.assertEqual(cells["json_ext__roof"], {"tin"})
 
+    def test_an_export_with_custom_filters_writes_the_matching_rows_with_the_masked_columns_masked(self):
+        Individual(first_name="Bob", last_name="Byron", dob=datetime.date(1970, 5, 6), location=self.group.location,
+                   json_ext={"phone": "+257 2", "sex": "M"}).save(user=self.unmasked)
+        Group(code="MK-E2", location=self.group.location, json_ext={"income": 80, "roof": "straw"}).save(
+            user=self.unmasked)
+        for query, condition, field, column, clear, other in (
+                ("individualExport", "sex__iexact__string=F", "firstName", "first_name", "Ada", "Byron"),
+                ("groupExport", "roof__iexact__string=tin", "code", "code", "MK-E1", "MK-E2")):
+            args = 'customFilters: ["%s"],' % condition
+            with self.subTest(query=query):
+                cells = self.exported_cells(self.viewer, query, ["id", field, "lastName" if other == "Byron"
+                                                                 else "jsonExt.roof"], args)
+                self.assertEqual(cells[column], {MASKED})
+                self.assertNotIn(other, {cell for values in cells.values() for cell in values})
+                cells = self.exported_cells(self.unmasked, query, ["id", field], args)
+                self.assertEqual(cells[column], {clear})
+
     def test_a_failing_source_writes_no_file(self):
         def failing():
             raise RuntimeError("source unavailable")

@@ -6,7 +6,10 @@ from django.test.utils import CaptureQueriesContext
 
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_right_only_user
-from individual.models import Group, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload
+from individual.models import (
+    Group, GroupDataSource, GroupIndividual, Individual, IndividualDataSource, IndividualDataSourceUpload,
+    IndividualDataUploadRecords,
+)
 from individual.tests.test_data_masking import SEARCH_PERMS, RegisteredFieldsTestMixin
 from location.test_helpers import create_test_village
 
@@ -72,6 +75,14 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         "group enrollment summary": '{ groupEnrollmentSummary(customFilters: ["phone__icontains__string=+257"]) '
                                     '{ numberOfSelectedGroups } }',
         "export filter": '{ individualExport(firstName_Icontains: "Ad", fields: ["id"], fieldsColumns: "{}") }',
+        "persons nested in a location": '{ individual(id: "%(person)s") { edges { node { location { '
+                                        'individuals(firstName_Icontains: "Ad") { totalCount } } } } } }',
+        "groups nested in a location": '{ group(id: "%(group)s") { edges { node { location { '
+                                       'groups(code_Icontains: "MK") { totalCount } } } } } }',
+        "persons nested in a user": '{ individualHistory(id: "%(person)s") { edges { node { userUpdated { '
+                                    'individualUserCreated(dob_Lt: "1990-01-01") { totalCount } } } } } }',
+        "memberships nested in a user": '{ individualHistory(id: "%(person)s") { edges { node { userUpdated { '
+                                        'groupindividualUserCreated(role: HEAD) { totalCount } } } } } }',
     }
 
     def test_an_export_custom_filter_reading_a_masked_field_is_refused_without_the_masked_data_right(self):
@@ -152,6 +163,76 @@ class MaskedFiltersTest(RegisteredFieldsTestMixin, openIMISGraphQLTestCase):
         self.assertTrue(any('ORDER BY "individual_individual"."last_name" ASC, "individual_individual"."UUID" ASC'
                             in query["sql"] for query in queries.captured_queries))
 
+    def order_sql(self, user, query, table):
+        """The ORDER BY clauses of the statements listing ``table`` that ``query`` runs."""
+        with CaptureQueriesContext(connection) as queries:
+            content = self.gql(user, query)
+        self.assertNotIn("errors", content)
+        return [query["sql"].split("ORDER BY", 1)[1] for query in queries.captured_queries
+                if f'FROM "{table}"' in query["sql"] and "ORDER BY" in query["sql"]]
+
+    UPLOAD_ORDERINGS = (
+        ('{ individualDataSourceUpload(orderBy: ["%s"]) { edges { node { id } } } }',
+         "individual_individualdatasourceupload"),
+        ('{ individualDataUploadHistory(orderBy: ["%s"]) { edges { node { id } } } }',
+         "individual_individualdatauploadrecords"),
+    )
+
+    def test_an_upload_ordering_on_a_masked_or_undescribed_json_field_is_left_out_without_the_masked_data_right(
+            self):
+        IndividualDataUploadRecords(data_upload=self.upload, workflow="Python Import Individuals").save(
+            user=self.unmasked)
+        for query, table in self.UPLOAD_ORDERINGS:
+            prefix = "" if "Upload(" in query else "dataUpload__"
+            for term, read in ((f"{prefix}individualdatasource__jsonExt__phone", "Json_ext"),
+                               (f"{prefix}individualdatasource__jsonExt__first_name", "Json_ext"),
+                               (f"-{prefix}individualdatasource__validations__validation_errors", "validations"),
+                               (f"{prefix}individualdatasource__individual__firstName", "first_name")):
+                with self.subTest(query=query, term=term):
+                    orders = self.order_sql(self.viewer, query % term, table)
+                    self.assertTrue(orders)
+                    for order in orders:
+                        self.assertNotIn(read, order)
+                        self.assertIn(f'"{table}"."UUID" ASC', order)
+                    self.assertTrue(any(read in order for order in self.order_sql(self.unmasked, query % term, table)))
+
+    def test_an_upload_ordering_on_an_unmasked_column_ends_with_the_primary_key(self):
+        query, table = self.UPLOAD_ORDERINGS[0]
+        self.assertTrue(any(order.startswith(f' "{table}"."source_name" ASC, "{table}"."UUID" ASC')
+                            for order in self.order_sql(self.viewer, query % "sourceName", table)))
+        self.assertTrue(any("'sex'" in order and f'"{table}"."UUID" ASC' in order for order in self.order_sql(
+            self.viewer, query % "-individualdatasource__jsonExt__sex", table)))
+
+    def test_an_ordering_through_a_list_index_on_a_masked_key_is_left_out(self):
+        from individual.data_masking import reads_masked_field
+
+        GroupDataSource(upload=self.upload, group=self.group, json_ext={
+            "code": "MK-F1", "individuals_data": [{"role": "HEAD"}, {"role": "SON"}]}).save(user=self.unmasked)
+        self.assertTrue(reads_masked_field(GroupDataSource, "json_ext__individuals_data__0__role"))
+        self.assertTrue(reads_masked_field(GroupDataSource, "json_ext__individuals_data__1"))
+        self.assertFalse(reads_masked_field(GroupDataSource, "json_ext__individuals_data__0__sex"))
+        table = "individual_groupdatasource"
+        query = ('{ groupDataSource(upload_Id: "%(upload)s", orderBy: ["jsonExt__individualsData__0__role"]) '
+                 '{ edges { node { id } } } }')
+        orders = self.order_sql(self.viewer, query, table)
+        self.assertTrue(orders)
+        for order in orders:
+            self.assertNotIn("individuals_data", order)
+            self.assertIn(f'"{table}"."UUID" ASC', order)
+        self.assertTrue(any("individuals_data" in order for order in self.order_sql(self.unmasked, query, table)))
+
+    def test_a_data_source_ordering_crossing_a_json_field_no_mask_describes_is_left_out(self):
+        table = "individual_individualdatasource"
+        for term in ("validations__validation_errors__0__note", "-validations"):
+            query = ('{ individualDataSource(upload_Id: "%%(upload)s", orderBy: ["%s"]) { edges { node { id } } } }'
+                     % term)
+            with self.subTest(term=term):
+                orders = self.order_sql(self.viewer, query, table)
+                self.assertTrue(orders)
+                for order in orders:
+                    self.assertNotIn('"validations"', order)
+                    self.assertIn(f'"{table}"."UUID" ASC', order)
+                self.assertTrue(any('"validations"' in order for order in self.order_sql(self.unmasked, query, table)))
 
 ENROLL = """
 mutation ($input: %sInput!) { %s(input: $input) { internalId } }

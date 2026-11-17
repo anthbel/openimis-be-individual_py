@@ -11,7 +11,6 @@ from django.db.models import Q, OuterRef, Subquery
 
 from core.custom_filters import CustomFilterWizardStorage
 from core.gql.export_mixin import ExportableQueryMixin
-from core.schema import OrderedDjangoFilterConnectionField
 from core.services import wait_for_mutation
 from core.utils import append_validity_filter, is_valid_uuid
 from individual.apps import IndividualConfig
@@ -27,6 +26,7 @@ from individual.gql_queries import IndividualGQLType, IndividualHistoryGQLType, 
     IndividualSummaryEnrollmentGQLType, IndividualDataUploadQGLType, \
     GroupIndividualHistoryGQLType, GlobalSchemaType, \
     GroupSummaryEnrollmentGQLType, GroupDataSourceGQLType, MaskedOrderedFilterConnectionField
+from individual.gql_queries import MaskedOrderedConnectionField
 from individual.models import Individual, IndividualDataSource, Group, \
     GroupIndividual, IndividualDataSourceUpload, IndividualDataUploadRecords, GroupDataSource
 from location.apps import LocationConfig
@@ -56,7 +56,11 @@ _EXPORTING_USER = contextvars.ContextVar("individual_exporting_user", default=No
 
 class MaskedExportQueryMixin(ExportableQueryMixin):
     """Core's exports, refusing to a user without the masked-data right the filters and custom filters that read
-    a masked field, and writing the columns that read one masked (``mask_export_columns``, the first patch)."""
+    a masked field, and writing the columns that read one masked (``mask_export_columns``, the first patch).
+
+    The exporters belong to the class declaring the exported fields: the schema's query class, which combines
+    it with the queries of other modules, inherits them as they are, so the export settings of those modules
+    (``related_field``, ``object_type``) and their exporters never apply to these fields."""
 
     @classmethod
     def get_patches_for_field(cls, field_type):
@@ -65,8 +69,10 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
 
     @classmethod
     def create_export_function(cls, field_name):
-        super().create_export_function(field_name)
         resolver_name = f"resolve_{field_name}_export"
+        if getattr(getattr(cls, resolver_name, None), "masked_export", False):
+            return
+        super().create_export_function(field_name)
         core_exporter = getattr(cls, resolver_name)
 
         def exporter(root, info, **kwargs):
@@ -82,6 +88,7 @@ class MaskedExportQueryMixin(ExportableQueryMixin):
             finally:
                 _EXPORTING_USER.reset(token)
 
+        exporter.masked_export = True
         setattr(cls, resolver_name, staticmethod(exporter))
 
 
@@ -139,7 +146,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         client_mutation_id=graphene.String()
     )
 
-    individual_data_source_upload = OrderedDjangoFilterConnectionField(
+    individual_data_source_upload = MaskedOrderedConnectionField(
         IndividualDataSourceUploadGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -190,7 +197,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         benefitPlanId=graphene.String()
     )
 
-    individual_data_upload_history = OrderedDjangoFilterConnectionField(
+    individual_data_upload_history = MaskedOrderedConnectionField(
         IndividualDataUploadQGLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
@@ -250,6 +257,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         parent_location = kwargs.get('parent_location')
         parent_location_level = kwargs.get('parent_location_level')
         if parent_location is not None and parent_location_level is not None:
+            check_filter_lookups(info.context.user, Individual, ["location"])
             filters.append(Query._get_location_filters(parent_location, parent_location_level))
 
         query = IndividualGQLType.get_queryset(None, info)
@@ -274,7 +282,8 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         ).exclude(
             is_deleted=True
         ).values('individual')
-        query = Individual.objects.filter(is_deleted=False)
+        visible = Individual.get_queryset(Individual.objects.filter(is_deleted=False), info.context.user)
+        query = visible
         custom_filters = kwargs.get("customFilters", None)
         check_filter_lookups(info.context.user, Individual, custom_filter_lookups(custom_filters))
         benefit_plan_id = kwargs.get("benefitPlanId", None)
@@ -290,7 +299,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         number_of_selected_individuals = query.count()
 
         # Aggregation for total number of individuals
-        total_number_of_individuals = Individual.objects.filter(is_deleted=False).count()
+        total_number_of_individuals = visible.distinct().count()
         individuals_not_assigned_to_programme = query.\
             filter(is_deleted=False, beneficiary__benefit_plan_id__isnull=True).count()
         individuals_assigned_to_programme = number_of_selected_individuals - individuals_not_assigned_to_programme
@@ -398,6 +407,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         parent_location = kwargs.get('parent_location')
         parent_location_level = kwargs.get('parent_location_level')
         if parent_location is not None and parent_location_level is not None:
+            check_filter_lookups(info.context.user, Group, ["location"])
             filters.append(Query._get_location_filters(parent_location, parent_location_level))
 
         query = GroupGQLType.get_queryset(None, info)
@@ -476,7 +486,8 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
     def resolve_group_enrollment_summary(self, info, **kwargs):
         Query._check_permissions(info.context.user,
                                  IndividualConfig.gql_group_search_perms)
-        query = Group.objects.filter(is_deleted=False)
+        visible = Group.get_queryset(Group.objects.filter(is_deleted=False), info.context.user)
+        query = visible
         custom_filters = kwargs.get("customFilters", None)
         check_filter_lookups(info.context.user, Group, custom_filter_lookups(custom_filters))
         benefit_plan_id = kwargs.get("benefitPlanId", None)
@@ -491,7 +502,7 @@ class Query(MaskedExportQueryMixin, graphene.ObjectType):
         number_of_selected_groups = query.count()
 
         # Aggregation for total number of groups
-        total_number_of_groups = Group.objects.filter(is_deleted=False).count()
+        total_number_of_groups = visible.count()
         groups_not_assigned_to_programme = query.\
             filter(is_deleted=False, groupbeneficiary__benefit_plan_id__isnull=True).count()
         groups_assigned_to_programme = number_of_selected_groups - groups_not_assigned_to_programme
