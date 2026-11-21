@@ -897,11 +897,11 @@ class IndividualImportService:
     def _save_data_source(self, dataframe: pd.DataFrame, upload: IndividualDataSourceUpload):
         data_source_objects = []
 
-        for __, row in dataframe.iterrows():
+        for number, (__, row) in enumerate(dataframe.iterrows()):
             ds = IndividualDataSource(
                 upload=upload,
                 json_ext=json.loads(row.to_json()),
-                validations={},
+                validations={'row': number},
                 user_created=self.user,
                 user_updated=self.user,
                 uuid=uuid.uuid4()
@@ -936,7 +936,10 @@ class IndividualImportService:
             return upload
 
     def save_validation_error_in_data_source_bulk(self, validated_dataframe):
+        """Stores each row's validation errors; the row number staged with it is kept."""
         data_sources_to_update = []
+        ids = [field_validation['row']['id'] for field_validation in validated_dataframe]
+        numbers = dict(IndividualDataSource.objects.filter(id__in=ids).values_list('id', 'validations__row'))
 
         for field_validation in validated_dataframe:
             row = field_validation['row']
@@ -952,7 +955,8 @@ class IndividualImportService:
             data_sources_to_update.append(
                 IndividualDataSource(
                     id=row['id'],
-                    validations={'validation_errors': error_fields}
+                    validations={'validation_errors': error_fields,
+                                 **({'row': numbers[row['id']]} if numbers.get(row['id']) is not None else {})}
                 )
             )
 

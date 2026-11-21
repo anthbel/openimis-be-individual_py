@@ -12,7 +12,7 @@ from core.models import User
 from individual.apps import IndividualConfig
 from individual.models import IndividualDataSource
 from individual.services import IndividualImportService
-from individual.upload_columns import is_registered_column
+from individual.upload_columns import is_registered_column, removed_columns
 from individual.utils import load_dataframe
 from workflow.exceptions import PythonWorkflowHandlerException
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def check_dataframe_headers(df_headers, schema, is_update=False):
     """Raise when the uploaded columns are not the schema's and the base fields, plus the registered upload
-    columns for an import; an update creates no group step that would remove them from the person."""
+    columns for an import; an update refuses them."""
     schema_properties = set(schema.get('properties', {}).keys())
     schema_properties.update(['recipient_info', 'group_code', 'individual_role'])
     if not is_update:
@@ -45,6 +45,29 @@ def check_dataframe_headers(df_headers, schema, is_update=False):
 
     if errors:
         raise PythonWorkflowHandlerException("\n".join(errors))
+
+
+def remove_registered_columns_from_persons(upload_id):
+    """Removes the registered upload columns from the persons the SQL workflows created from the upload's rows.
+
+    Those workflows copy the whole row into the person and link the row by that copy, so the columns are
+    removed once the rows are linked; the rows keep them.
+    """
+    schema_properties = json.loads(IndividualConfig.individual_schema).get('properties', {})
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT DISTINCT jsonb_object_keys("Json_ext") FROM individual_individualdatasource '
+            'WHERE upload_id = %s AND "isDeleted" = False AND jsonb_typeof("Json_ext") = \'object\'',
+            [str(upload_id)],
+        )
+        removed = removed_columns([key for (key,) in cursor.fetchall()], schema_properties)
+        if removed:
+            cursor.execute(
+                'UPDATE individual_individual SET "Json_ext" = "Json_ext" - %s::text[] WHERE "UUID" IN ('
+                'SELECT individual_id FROM individual_individualdatasource '
+                'WHERE upload_id = %s AND individual_id IS NOT NULL)',
+                [removed, str(upload_id)],
+            )
 
 
 class BasePythonWorkflowExecutor(metaclass=ABCMeta):

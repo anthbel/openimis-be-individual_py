@@ -1,7 +1,7 @@
 import logging
 
 from core.models import User
-from individual.workflows.utils import SqlProcedurePythonWorkflow
+from individual.workflows.utils import SqlProcedurePythonWorkflow, remove_registered_columns_from_persons
 from individual.services import IndividualImportService
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ def process_import_valid_individuals_workflow(user_uuid, upload_uuid, accepted=N
         service.execute(upload_sql_partial, [upload_uuid, user_uuid, accepted])
     else:
         service.execute(upload_sql, [upload_uuid, user_uuid])
+    remove_registered_columns_from_persons(upload_uuid)
     IndividualImportService(user).synchronize_data_for_reporting(upload_uuid)
 
 

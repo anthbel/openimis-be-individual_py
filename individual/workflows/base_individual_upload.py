@@ -1,7 +1,7 @@
 import logging
 
 from core.models import User
-from individual.workflows.utils import DataUploadWorkflow
+from individual.workflows.utils import DataUploadWorkflow, remove_registered_columns_from_persons
 from individual.services import IndividualImportService
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,7 @@ def process_import_individuals_workflow(user_uuid, upload_uuid):
     service = DataUploadWorkflow(upload_uuid, user_uuid)
     service.validate_dataframe_headers()
     service.execute(upload_sql)
+    remove_registered_columns_from_persons(upload_uuid)
     IndividualImportService(user).synchronize_data_for_reporting(upload_uuid)
 
 

@@ -558,7 +558,11 @@ def finish_validation(upload_id, user_id):
 # --- stage 4: import the approved rows ---------------------------------------
 
 def import_chunk(user_id, row_ids):
-    """Create the individuals of one chunk of valid rows, linked by row id."""
+    """Create the individuals of one chunk of valid rows, linked by row id; the registered upload columns stay
+    on the row."""
+    from individual.upload_columns import person_json_ext
+
+    schema_properties = _schema_properties()
     with transaction.atomic():
         rows = list(
             IndividualDataSource.objects.select_for_update()
@@ -573,7 +577,7 @@ def import_chunk(user_id, row_ids):
                 last_name=data.get("last_name"),
                 dob=datetime.datetime.strptime(str(data.get("dob")), "%Y-%m-%d").date(),
                 location_id=(row.validations or {}).get("location_id"),
-                json_ext=data,
+                json_ext=person_json_ext(data, schema_properties),
                 user_created_id=user_id,
                 user_updated_id=user_id,
             )
