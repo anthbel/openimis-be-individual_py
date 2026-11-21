@@ -55,14 +55,13 @@ def is_valid_file(import_file):
     return True, None
 
 
-# Function to retrieve global schema fields from IndividualConfig
-def get_global_schema_fields():
-    # Load individual schema as a dictionary
+def template_fields():
+    """The columns of the upload template, each once: the base fields, the individual_schema properties in
+    schema order, the membership columns of the group step, then the registered upload columns."""
     schema = json.loads(IndividualConfig.individual_schema)
-    # Extract property keys and add additional fields specific to individuals
-    schema_properties = set(schema.get('properties', {}).keys())
-    schema_properties.update(['recipient_info', 'individual_role', 'group_code'])
-    return list(schema_properties) + [column for column in template_columns() if column not in schema_properties]
+    fields = [*IndividualConfig.individual_base_fields, *schema.get('properties', {}).keys(),
+              'recipient_info', 'individual_role', 'group_code', *template_columns()]
+    return list(dict.fromkeys(fields))
 
 
 # API endpoint to download a CSV template for individual data import
@@ -70,10 +69,7 @@ def get_global_schema_fields():
 @permission_classes([check_user_rights(IndividualConfig.gql_individual_create_perms)])
 def download_template_file(request):
     try:
-        # Base fields and extra fields required in the template
-        base_fields = IndividualConfig.individual_base_fields
-        extra_fields = get_global_schema_fields()
-        all_fields = base_fields + extra_fields
+        all_fields = template_fields()
 
         # Create an empty DataFrame with the required fields
         template_df = pd.DataFrame(columns=all_fields)

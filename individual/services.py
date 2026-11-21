@@ -28,6 +28,7 @@ from individual.models import (
     IndividualDataUploadRecords,
     IndividualDataSourceUpload
 )
+from individual import upload_typing
 from individual.task_masking import group_code, person_name
 from individual.utils import (
     load_dataframe,
@@ -652,13 +653,13 @@ class GroupAndGroupIndividualAlignmentService:
 class IndividualImportService:
     import_loaders = {
         # .csv
-        'text/csv': lambda f: pd.read_csv(f, dtype={"location_code": str}),
+        'text/csv': lambda f: upload_typing.read_csv(f),
         # .xlsx
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': lambda f: pd.read_excel(f),
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': lambda f: upload_typing.read_excel(f),
         # .xls
-        'application/vnd.ms-excel': lambda f: pd.read_excel(f),
+        'application/vnd.ms-excel': lambda f: upload_typing.read_excel(f),
         # .ods
-        'application/vnd.oasis.opendocument.spreadsheet': lambda f: pd.read_excel(f),
+        'application/vnd.oasis.opendocument.spreadsheet': lambda f: upload_typing.read_excel(f),
     }
 
     def __init__(self, user):
@@ -896,11 +897,12 @@ class IndividualImportService:
 
     def _save_data_source(self, dataframe: pd.DataFrame, upload: IndividualDataSourceUpload):
         data_source_objects = []
+        properties = upload_typing.schema_properties()
 
         for number, (__, row) in enumerate(dataframe.iterrows()):
             ds = IndividualDataSource(
                 upload=upload,
-                json_ext=json.loads(row.to_json()),
+                json_ext=upload_typing.typed_record(json.loads(row.to_json()), properties),
                 validations={'row': number},
                 user_created=self.user,
                 user_updated=self.user,

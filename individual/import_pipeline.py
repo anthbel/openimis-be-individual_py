@@ -36,7 +36,6 @@ import uuid
 from collections import OrderedDict, deque
 from concurrent.futures import ProcessPoolExecutor
 
-import pandas as pd
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
@@ -196,21 +195,26 @@ def register_upload(user, import_file):
 # --- reading the file --------------------------------------------------------
 
 def _iter_chunks(path, content_type, chunk_size):
+    from individual import upload_typing
+
     with default_storage.open(path, "rb") as handle:
         if content_type == CSV_CONTENT_TYPE:
-            for chunk in pd.read_csv(handle, dtype={"location_code": str}, chunksize=chunk_size):
+            for chunk in upload_typing.read_csv(handle, chunksize=chunk_size):
                 yield chunk
         else:
-            frame = pd.read_excel(handle, dtype={"location_code": str})
+            frame = upload_typing.read_excel(handle)
             for start in range(0, len(frame), chunk_size):
                 yield frame.iloc[start:start + chunk_size]
 
 
 def _records(chunk):
+    from individual.upload_typing import typed_record
+
     if "Unnamed: 0" in chunk.columns:
         chunk = chunk.drop("Unnamed: 0", axis=1)
+    properties = _schema_properties()
     # Same conversion as the SQL path's per-row `row.to_json()`, once per chunk.
-    return json.loads(chunk.to_json(orient="records"))
+    return [typed_record(record, properties) for record in json.loads(chunk.to_json(orient="records"))]
 
 
 def check_headers(columns):
