@@ -20,6 +20,7 @@ from individual.apps import IndividualConfig
 from individual.data_masking import mask_for_user, may_see_masked
 from individual.models import IndividualDataSource
 from individual.services import IndividualImportService
+from individual.upload_columns import template_columns
 
 from workflow.services import WorkflowService
 
@@ -61,7 +62,7 @@ def get_global_schema_fields():
     # Extract property keys and add additional fields specific to individuals
     schema_properties = set(schema.get('properties', {}).keys())
     schema_properties.update(['recipient_info', 'individual_role', 'group_code'])
-    return list(schema_properties)
+    return list(schema_properties) + [column for column in template_columns() if column not in schema_properties]
 
 
 # API endpoint to download a CSV template for individual data import

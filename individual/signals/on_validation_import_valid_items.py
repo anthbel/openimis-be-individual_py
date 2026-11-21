@@ -1,4 +1,5 @@
 import copy
+import json
 import logging
 import random
 import string
@@ -18,6 +19,7 @@ from individual.models import (
     IndividualDataUploadRecords, Group, GroupIndividual, Individual, GroupDataSource
 )
 from individual.services import GroupService
+from individual.upload_columns import is_registered_column
 from tasks_management.apps import TasksManagementConfig
 from tasks_management.models import Task
 from tasks_management.services import TaskService
@@ -214,12 +216,16 @@ class BaseGroupColumnAggregationClass(ItemsUploadTaskCompletionEvent):
         )
 
     def _clean_json_ext(self):
+        schema_properties = json.loads(IndividualConfig.individual_schema).get('properties', {})
+
         def clean_json_ext(json_ext):
             if json_ext is None:
                 return None
             json_ext.pop(self.group_code_str, None)
             json_ext.pop(self.recipient_info_str, None)
             json_ext.pop(self.individual_role_str, None)
+            for key in [key for key in json_ext if key not in schema_properties and is_registered_column(key)]:
+                json_ext.pop(key)
             return json_ext
 
         for individual in self.individuals:

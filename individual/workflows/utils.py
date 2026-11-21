@@ -12,6 +12,7 @@ from core.models import User
 from individual.apps import IndividualConfig
 from individual.models import IndividualDataSource
 from individual.services import IndividualImportService
+from individual.upload_columns import is_registered_column
 from individual.utils import load_dataframe
 from workflow.exceptions import PythonWorkflowHandlerException
 
@@ -19,9 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 def check_dataframe_headers(df_headers, schema, is_update=False):
-    """Raise when the uploaded columns are not the schema's plus the base fields."""
+    """Raise when the uploaded columns are not the schema's and the base fields, plus the registered upload
+    columns for an import; an update creates no group step that would remove them from the person."""
     schema_properties = set(schema.get('properties', {}).keys())
     schema_properties.update(['recipient_info', 'group_code', 'individual_role'])
+    if not is_update:
+        schema_properties.update(header for header in df_headers if is_registered_column(header))
     required_headers = set(IndividualConfig.individual_base_fields)
     if is_update:
         required_headers.add('ID')
