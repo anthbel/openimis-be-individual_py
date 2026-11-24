@@ -283,10 +283,15 @@ def _blank(value):
 
 
 def _validate_record(record, context):
-    """The row's validation errors, and the village it resolves to."""
+    """The row's validation errors, and the village it resolves to. A masked column holding the mask placeholder
+    is refused, as the update workflow refuses it."""
+    from individual.data_masking import masked_row_fields_holding_the_mask
     from individual.services import IndividualImportService
 
-    errors = []
+    errors = [
+        {"field_name": field, "note": f"'{field}' holds the mask placeholder, which is not a value"}
+        for field in masked_row_fields_holding_the_mask(record)
+    ]
     for field in ("first_name", "last_name"):
         if _blank(record.get(field)):
             errors.append({"field_name": field, "note": f"'{field}' is required"})

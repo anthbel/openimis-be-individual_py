@@ -190,7 +190,8 @@ class DataUploadWorkflow(MakerCheckerPythonWorkflowExecutor):
     def should_create_task(self):
         validation_response = self.import_service.validate_import_individuals(
             upload_id=self.upload_uuid,
-            individual_sources=IndividualDataSource.objects.filter(upload_id=self.upload_uuid)
+            individual_sources=IndividualDataSource.objects.filter(upload_id=self.upload_uuid),
+            refuse_mask_placeholder=True,
         )
         return validation_response['summary_invalid_items'] or True  # Replace this with config check
 
