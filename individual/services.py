@@ -8,7 +8,6 @@ from django.core.files.uploadedfile import InMemoryUploadedFile
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from calculation.services import get_calculation_object
 from core.custom_filters import CustomFilterWizardStorage
 from core.models import User
 from core.service_errors import ServiceError
@@ -869,7 +868,17 @@ class IndividualImportService:
         if not validation_calculation:
             raise ValueError("Missing validation name")
         calculation_uuid = IndividualConfig.validation_calculation_uuid
-        calculation = get_calculation_object(calculation_uuid)
+        calculation = None
+        if apps.is_installed("calculation"):
+            from calculation.services import get_calculation_object
+            calculation = get_calculation_object(calculation_uuid)
+        if calculation is None:
+            return {
+                "success": False,
+                "field_name": field,
+                "note": f"'{field}' cannot be validated: no validation calculation is available "
+                        f"for rule '{calculation_uuid}'",
+            }
         result_row = calculation.calculate_if_active_for_object(
             validation_calculation,
             calculation_uuid,
