@@ -28,7 +28,8 @@ def remove_rights(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('individual', '0001_initial')
+        ('individual', '0001_initial'),
+        ('core', '0020_add_missing_fields_to_django_scheme'),
     ]
 
     operations = [
