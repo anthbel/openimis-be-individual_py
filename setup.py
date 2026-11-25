@@ -23,7 +23,8 @@ setup(
         'django',
         'django-db-signals',
         'djangorestframework',
-        'openimis-be-core'
+        'openimis-be-core',
+        'openpyxl>=3.1.5',
     ],
     classifiers=[
         'Environment :: Web Environment',

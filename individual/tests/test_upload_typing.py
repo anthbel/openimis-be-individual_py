@@ -72,6 +72,17 @@ class UploadTypingTest(Typed, SimpleTestCase):
                          ("1", "0101", "07123456"))
 
 
+    def test_an_xlsx_file_is_read_with_the_same_text_columns(self):
+        sheet = io.BytesIO()
+        upload_typing.read_csv(io.StringIO(CSV)).to_excel(sheet, index=False)
+        sheet.seek(0)
+        records = self.records(upload_typing.read_excel(sheet))
+        self.assertEqual(records[0], {
+            "first_name": "Ada", "last_name": "One", "dob": "1990-01-01", "location_name": "Village",
+            "location_code": "0101", "group_code": "G1", "sexe": "1", "age": 35, "income": 12.5,
+            "hh_phone": "07123456",
+        })
+
 class SqlStagingTypingTest(Typed, TestCase):
     @classmethod
     def setUpClass(cls):
